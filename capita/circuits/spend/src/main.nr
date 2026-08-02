@@ -44,13 +44,17 @@
 //   in-circuit pk_self, not a free witness key, so "change" cannot be
 //   routed elsewhere to understate v1.
 //
-// - s_old carries no range check, deliberately: it is bound by C_t_old,
-//   which must open a tally already in the tree. Tallies enter the tree at
-//   s = 0 (enrollment) or s_old + v1 (here), v1 < 2^64 per spend, and the
-//   depth-16 tree caps total notes at 2^16 -- so every reachable subtotal
-//   stays below 2^80, far from the field modulus, and s_old + v1 cannot
-//   wrap. Task 8's threshold comparison must bound s_new explicitly when
-//   it compares against T.
+// - s_old is range-checked to 128 bits -- not because honest values need
+//   it (tallies enter the tree at s = 0 on enrollment or s_old + v1 here,
+//   v1 < 2^64 per spend, and the depth-16 tree caps notes at 2^16, so
+//   every reachable subtotal stays below 2^80 by induction) but so that
+//   circuit-local soundness does not lean on pool admission discipline: a
+//   tally leaf forged with s_old near the field modulus would otherwise
+//   wrap s_new = s_old + v1 into a limit reset. With s_old < 2^128 and
+//   v1 < 2^64 the sum stays far below the modulus, and the 2^48 headroom
+//   over any reachable subtotal means the check can never reject an
+//   honest witness. Task 8's threshold comparison must still bound s_new
+//   explicitly when it compares against T.
 
 use common::{
     MERKLE_DEPTH, merkle_verify, note_nullifier, owner_pk, payment_commit, person_id,
@@ -97,7 +101,10 @@ fn main(
     let n_pay = note_nullifier(owner_sk, c_in);
 
     // The payer's tally note, likewise from its opening. person_secret
-    // both reconstructs the commitment's pid and keys the nullifier.
+    // both reconstructs the commitment's pid and keys the nullifier. The
+    // 128-bit bound on s_old keeps s_new = s_old + v1 wrap-free even for
+    // a tally leaf that slipped past pool admission (see header note).
+    s_old.assert_max_bit_size::<128>();
     let pid = person_id(person_secret);
     let c_t_old = tally_commit(pid, s_old, d_old, r_t);
     merkle_verify(c_t_old, root, path_t_siblings, path_t_indices);
@@ -227,6 +234,65 @@ mod tests {
         let v2 = 0 - 100;
         let _ = main(
             SECRET, V_IN, SK, R_IN, pay_sibs, [false; 16], v1, PK1, R1, v2, R2, S_OLD, DAY, R_T,
+            tally_sibs, tally_indices(), R_T_NEW, root, DAY,
+        );
+    }
+
+    #[test(should_fail)]
+    fn negative_recipient_amount_wrapping_the_field_is_unsatisfiable() {
+        // Mirror of the v2 case, closing the worse direction: v1 = -100
+        // (P - 100) with v2 = v_in + 100 satisfies conservation as FIELD
+        // arithmetic and would DECREASE the tally (s_new = s_old - 100 --
+        // direct limit evasion) while inflating change past v_in. Only
+        // v1's 64-bit range constraint rejects it; every other constraint
+        // holds by construction, so this test fails if that constraint is
+        // ever deleted.
+        let (c_pay, c_tally) = honest_leaves();
+        let (root, pay_sibs, tally_sibs) = two_leaf_tree(c_pay, c_tally);
+
+        let v1 = 0 - 100;
+        let v2 = V_IN + 100;
+        let _ = main(
+            SECRET, V_IN, SK, R_IN, pay_sibs, [false; 16], v1, PK1, R1, v2, R2, S_OLD, DAY, R_T,
+            tally_sibs, tally_indices(), R_T_NEW, root, DAY,
+        );
+    }
+
+    #[test(should_fail)]
+    fn forged_note_with_oversized_value_is_unsatisfiable() {
+        // v_in's own range constraint, isolated. A forged payment leaf
+        // carries v_in = 2^64 + 40; v1 = 2^63 and v2 = 2^63 + 40 both pass
+        // their 64-bit checks and conserve v_in exactly (as integers, no
+        // wrap), and the membership check passes because the forged leaf
+        // IS in the test tree. Only v_in's range constraint rejects it.
+        let two63: Field = 9223372036854775808;
+        let v_in = two63 + two63 + 40;
+        let c_pay = payment_commit(v_in, owner_pk(SK), R_IN);
+        let c_tally = tally_commit(person_id(SECRET), S_OLD, DAY, R_T);
+        let (root, pay_sibs, tally_sibs) = two_leaf_tree(c_pay, c_tally);
+
+        let _ = main(
+            SECRET, v_in, SK, R_IN, pay_sibs, [false; 16], two63, PK1, R1, two63 + 40, R2, S_OLD,
+            DAY, R_T, tally_sibs, tally_indices(), R_T_NEW, root, DAY,
+        );
+    }
+
+    #[test(should_fail)]
+    fn forged_tally_subtotal_near_the_modulus_is_unsatisfiable() {
+        // The review's probe, pinned: a tally leaf forged with s_old =
+        // P - 50 (only reachable by bypassing pool admission -- every
+        // honest entry path constrains s) would wrap s_new to 150, a limit
+        // reset. The commitment opens the forged leaf, so membership,
+        // conservation, ranges on v, and the day all hold; only s_old's
+        // 128-bit bound rejects it, making circuit-local soundness
+        // independent of admission discipline.
+        let s_old = 0 - 50;
+        let c_pay = payment_commit(V_IN, owner_pk(SK), R_IN);
+        let c_tally = tally_commit(person_id(SECRET), s_old, DAY, R_T);
+        let (root, pay_sibs, tally_sibs) = two_leaf_tree(c_pay, c_tally);
+
+        let _ = main(
+            SECRET, V_IN, SK, R_IN, pay_sibs, [false; 16], V1, PK1, R1, V2, R2, s_old, DAY, R_T,
             tally_sibs, tally_indices(), R_T_NEW, root, DAY,
         );
     }
