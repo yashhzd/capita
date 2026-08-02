@@ -71,7 +71,9 @@
 //   are exact and the ordering is true integer ordering.
 //
 // - The threshold flag is a hinted witness pinned by one muxed range
-//   check (assert_over_threshold_iff below); a huge s_new from a forged
+//   check (assert_over_threshold_iff below), whose verdict is exact only
+//   under its precondition s_new < 2^129 -- established here by the
+//   pinned s_old and v1 bounds. Within it, a huge s_new from a forged
 //   tally can only satisfy the OVER side, so forgery forces disclosure
 //   rather than evading it.
 //
@@ -108,25 +110,39 @@ unconstrained fn gt_hint(a: Field, b: Field) -> bool {
     gt
 }
 
-// Constrains `over == (s_new > t)` as integers, given t < 2^64 (checked
-// here) and s_new below 2^129 (guaranteed by the caller: s_old < 2^128 and
-// v1 < 2^64 bound both rollover branches). One muxed 129-bit range check
-// does it:
+// Constrains `over == (s_new > t)` as canonical integers -- UNDER A
+// PRECONDITION the caller must establish.
+//
+// PRECONDITION (not checked here): s_new < 2^129. main guarantees it with
+// room to spare: s_old < 2^128 and v1 < 2^64 are pinned range constraints,
+// so both rollover branches keep s_new at or below 2^128 + 2^64 - 2. The
+// other operand bound, t < 2^64, IS checked here. Under both bounds, one
+// muxed 129-bit range check decides the comparison:
 //
 //   over = true:  diff = s_new - t - 1. If s_new > t this is an integer in
 //                 [0, 2^129) and passes. If s_new <= t it wraps to
 //                 P - k with k <= 2^64 + 1, far above 2^129 -- fails.
 //   over = false: diff = t - s_new. If s_new <= t this is an integer
-//                 below 2^64 and passes. If s_new > t it wraps to at
-//                 least P - 2^129, again far above 2^129 -- fails.
+//                 below 2^64 and passes. If s_new > t it wraps to
+//                 P - (s_new - t), at least P - 2^129 under the
+//                 precondition, far above 2^129 -- fails.
 //
-// So for every satisfiable assignment the flag equals the true comparison
-// of canonical values; lying in either direction is unsatisfiable. The
-// t < 2^64 check is load-bearing: with t near P, "over" would satisfy for
-// small s_new (diff = s_new + (P - t) - 1 sneaks under 2^129). s_new needs
-// no check of its own here -- beyond 2^129 the over side is satisfiable
-// only up to 2^129 + t, where "over" is still the true verdict, and the
-// dummy side never is: a forged tally can only force disclosure, not
+// So WITHIN the precondition, every satisfiable assignment has the flag
+// equal to the true comparison; lying in either direction is
+// unsatisfiable. The t bound is load-bearing the same way: with t near P
+// admitted, "over" would satisfy for small s_new (diff = s_new + (P - t)
+// - 1 sneaks under 2^129).
+//
+// OUTSIDE the precondition the lemma is FALSE in one region: for s_new in
+// the field's top 2^129 slice (s_new > P - 2^129 + t), diff = t - s_new
+// wraps to the small value t + (P - s_new), so the DUMMY side accepts --
+// e.g. s_new = P - 1 satisfies over = false. Pinned as a known property
+// by outside_its_precondition_the_gadget_accepts_a_wrapped_dummy_claim;
+// reusing this gadget anywhere else requires re-establishing the caller
+// bound. Between 2^129 and that slice there is no lie: the over side
+// stays satisfiable only up to 2^129 + t, where "over" is genuinely
+// true, and everything further fails closed -- which is why, with main's
+// bounds in force, a forged tally can only force disclosure, never
 // escape it. Completeness at the top: the largest reachable s_new is
 // 2^128 + 2^64 - 2, whose diff fits 129 bits with room to spare.
 fn assert_over_threshold_iff(over: bool, s_new: Field, t: Field) {
@@ -177,6 +193,16 @@ fn main(
     v_in.assert_max_bit_size::<64>();
     v1.assert_max_bit_size::<64>();
     v2.assert_max_bit_size::<64>();
+
+    // The memo scalar limbs are bounded HERE, not only inside
+    // elgamal_encrypt: the library's own copies of these checks are
+    // compiled out of this circuit's ACIR (the range is subsumed into the
+    // MULTI_SCALAR_MUL inputs' declared bit widths), which left the limbs
+    // range-constrained by solver behavior rather than by a standalone
+    // opcode this circuit owns. Pinned by the ACIR shape test in
+    // spend-threshold.test.ts.
+    r_enc_lo.assert_max_bit_size::<128>();
+    r_enc_hi.assert_max_bit_size::<128>();
 
     // Ownership and membership of the consumed payment note, with the leaf
     // derived from its opening.
@@ -373,6 +399,30 @@ mod tests {
             c1, ct,
         );
         assert_eq(c_tally_new, tally_commit(pid, 10100, DAY, R_T_NEW));
+    }
+
+    #[test(should_fail_with = "spend: memo ct mismatch")]
+    fn crossing_spend_cannot_emit_a_wellformed_dummy_memo() {
+        // THE attack the disclosure mechanism exists to prevent: a payer
+        // whose subtotal crosses the threshold publishes a well-formed
+        // DUMMY memo instead of the report. Same crossing witness as the
+        // test above, memo = encryption of [0, 0, 0, 0] under the same
+        // randomness. c1 depends only on r_enc, so it matches and the
+        // failure isolates to the ciphertext equality: the only memo a
+        // crossing spend can settle with is the real report.
+        let s_old = 9900;
+        let pid = person_id(SECRET);
+        let c_pay = payment_commit(V_IN, owner_pk(SK), R_IN);
+        let c_tally = tally_commit(pid, s_old, DAY, R_T);
+        let (root, pay_sibs, tally_sibs) = two_leaf_tree(c_pay, c_tally);
+        let a = apk();
+        let (c1, ct) = elgamal_encrypt([0, 0, 0, 0], a.x, a.y, R_ENC, 0);
+
+        let _ = main(
+            SECRET, V_IN, SK, R_IN, pay_sibs, [false; 16], V1, PK1, R1, V2, R2, s_old, DAY, R_T,
+            tally_sibs, tally_indices(), R_T_NEW, R_ENC, 0, root, DAY, T_TEST, apk().x, apk().y,
+            c1, ct,
+        );
     }
 
     #[test]
@@ -732,5 +782,19 @@ mod tests {
         // wraps to exactly 5) -- the comparison would lie for small
         // subtotals. The bound rejects such a t before the mux runs.
         assert_over_threshold_iff(true, 5, 0 - 1);
+    }
+
+    #[test]
+    fn outside_its_precondition_the_gadget_accepts_a_wrapped_dummy_claim() {
+        // CHARACTERIZATION, not a desired property: the gadget's verdict
+        // is exact only under its documented precondition s_new < 2^129.
+        // In the field's top 2^129 slice the dummy side accepts a wrapped
+        // diff -- s_new = P - 1 here satisfies over = false even though
+        // its canonical value dwarfs t. main never reaches this region
+        // (the pinned s_old and v1 bounds cap s_new at 2^128 + 2^64 - 2);
+        // any OTHER caller must re-establish that bound. If this test
+        // ever fails, the gadget's semantics changed -- re-derive the
+        // lemma in its comment before touching anything.
+        assert_over_threshold_iff(false, 0 - 1, T_TEST);
     }
 }

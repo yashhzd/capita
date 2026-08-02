@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, expect, test } from "vitest";
-import { compile, execute } from "../src/prove.js";
+import { compile, execute, printAcir } from "../src/prove.js";
 import { closePoseidon } from "../src/poseidon.js";
 import { type Path } from "../src/merkle.js";
 import {
@@ -347,7 +347,11 @@ test("auditor.collect returns exactly the one real disclosure", async () => {
   // Five memos accumulated across the three flows above; only the
   // threshold-crossing spend carries a real report. The auditor decrypts
   // all of them and cannot be fooled by the dummies.
-  expect(memoLog).toHaveLength(5);
+  expect(
+    memoLog,
+    "memoLog is filled by the three flow tests above -- this file's tests " +
+      "are order-dependent, so run the whole file, not this test alone",
+  ).toHaveLength(5);
   expect(memoLog.filter((m) => m.kind === "real")).toHaveLength(1);
 
   const disclosures = await collect(
@@ -360,8 +364,18 @@ test("auditor.collect returns exactly the one real disclosure", async () => {
 });
 
 test("real and dummy memos are structurally identical", () => {
-  const real = memoLog.find((m) => m.kind === "real")!.memo;
-  const dummy = memoLog.find((m) => m.kind === "dummy")!.memo;
+  const realEntry = memoLog.find((m) => m.kind === "real");
+  const dummyEntry = memoLog.find((m) => m.kind === "dummy");
+  expect(
+    realEntry,
+    "needs the crossing flow (test 2) to have run first -- run the whole file",
+  ).toBeDefined();
+  expect(
+    dummyEntry,
+    "needs a dummy flow (tests 1-3) to have run first -- run the whole file",
+  ).toBeDefined();
+  const real = realEntry!.memo;
+  const dummy = dummyEntry!.memo;
 
   // Same shape, field for field: an ephemeral curve point plus exactly
   // four ciphertext limbs, every limb a canonical field element.
@@ -381,3 +395,36 @@ test("real and dummy memos are structurally identical", () => {
     expect(limb).not.toBe(0n);
   }
 });
+
+test(
+  "spend ACIR range-constrains the memo scalar limbs with standalone opcodes",
+  { timeout: 240_000 },
+  () => {
+    // Review finding (fix round 1): the library's 128-bit limb checks
+    // inside elgamal_encrypt are compiled OUT of this circuit's ACIR --
+    // their range is subsumed into the MULTI_SCALAR_MUL inputs' declared
+    // bit widths, leaving enforcement to the ACVM solver rather than an
+    // opcode the proven circuit owns. The spend circuit therefore bounds
+    // r_enc_lo/hi itself, and this test pins that at the artifact level:
+    // every witness fed to an MSM as a scalar limb must carry its own
+    // 128-bit RANGE opcode. Witness execution cannot observe this (the
+    // solver rejects oversized limbs either way), so the pin reads the
+    // compiled ACIR -- the thing that actually gets proven in Task 11.
+    const acir = printAcir(SPEND_DIR);
+    const scalarWitnesses = new Set<string>();
+    for (const msm of acir.matchAll(/MULTI_SCALAR_MUL[^\n]*scalars: \[([^\]]*)\]/g)) {
+      for (const w of msm[1].matchAll(/w\d+/g)) {
+        scalarWitnesses.add(w[0]);
+      }
+    }
+    // Vacuity guard: the memo's shared secret and ephemeral point are two
+    // MSMs over the same (lo, hi) scalar pair.
+    expect(scalarWitnesses.size).toBeGreaterThanOrEqual(2);
+    for (const witness of scalarWitnesses) {
+      expect(
+        acir.includes(`RANGE input: ${witness}, bits: 128`),
+        `MSM scalar limb ${witness} must carry a standalone 128-bit range opcode`,
+      ).toBe(true);
+    }
+  },
+);

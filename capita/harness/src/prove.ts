@@ -63,6 +63,21 @@ export function compile(circuitDir: string): void {
   });
 }
 
+/**
+ * Compiles the circuit and returns nargo's printed ACIR listing. Tests use
+ * this to pin the compiled circuit's SHAPE -- properties like "this witness
+ * carries a standalone range opcode" that witness execution cannot observe
+ * (the ACVM solver enforces blackbox input widths at witness generation
+ * whether or not the opcode exists, but the ACIR is what gets proven).
+ */
+export function printAcir(circuitDir: string): string {
+  return execFileSync(
+    nargoBin(),
+    ["compile", "--print-acir", "--silence-warnings"],
+    { cwd: circuitDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  );
+}
+
 function artifactPath(circuitDir: string): string {
   // nargo names the artifact after the package, not the directory.
   const manifest = readFileSync(join(circuitDir, "Nargo.toml"), "utf8");
