@@ -90,6 +90,35 @@ test("elgamal: c1 is on the curve", async () => {
   expect(memo.c1.inf).toBe(false);
 });
 
+// Guard contract pinned for Tasks 5/8: the throws below are documented
+// behavior (fail loudly rather than emit a memo padded with p2([0, 0, i])
+// that anyone can strip, or a limb that silently decrypts to limb mod P).
+// Without these tests a refactor could drop the guards with the suite
+// staying green.
+
+test("encrypt rejects a plaintext limb outside [0, P)", async () => {
+  const apk = keygen(5n);
+  await expect(encrypt([P, 0n, 0n, 0n], apk, 42n)).rejects.toThrow(RangeError);
+  await expect(encrypt([P, 0n, 0n, 0n], apk, 42n)).rejects.toThrow(/^encrypt: plaintext limb out of field range/);
+  await expect(encrypt([0n, 0n, 0n, -1n], apk, 42n)).rejects.toThrow(RangeError);
+});
+
+test("encrypt rejects rEnc = 0 (degenerate shared secret)", async () => {
+  const apk = keygen(5n);
+  await expect(encrypt([1n, 2n, 3n, 4n], apk, 0n)).rejects.toThrow(/^encrypt: degenerate shared secret/);
+  // Any multiple of the group order reduces to the same degenerate case.
+  await expect(encrypt([1n, 2n, 3n, 4n], apk, GRUMPKIN_ORDER)).rejects.toThrow(/^encrypt: degenerate shared secret/);
+});
+
+test("encrypt rejects apk = INF (degenerate shared secret)", async () => {
+  await expect(encrypt([1n, 2n, 3n, 4n], INF, 42n)).rejects.toThrow(/^encrypt: degenerate shared secret/);
+});
+
+test("decrypt rejects ask = 0 (degenerate shared secret)", async () => {
+  const memo = await encrypt([1n, 2n, 3n, 4n], keygen(5n), 42n);
+  await expect(decrypt(memo, 0n)).rejects.toThrow(/^decrypt: degenerate shared secret/);
+});
+
 // Range guard on p2: Grumpkin scalars live mod GRUMPKIN_ORDER, which is
 // LARGER than P, so a raw scalar fed to p2() would silently misencode. The
 // guard turns that whole class of silent corruption into a loud failure.

@@ -107,6 +107,11 @@ export function negate(pt: Pt): Pt {
 }
 
 // Group law. Every return is a fresh object so callers never alias inputs.
+// Precondition: finite inputs carry coordinates already normalized into
+// [0, P). The x-comparison below is raw bigint equality, so an unnormalized
+// coordinate (e.g. x + P) would silently take the chord branch where the
+// tangent applies. Every point this module produces satisfies this; points
+// constructed by hand (Tasks 4-8) must respect it too.
 export function add(a: Pt, b: Pt): Pt {
   if (a.inf) return { ...b };
   if (b.inf) return { ...a };
