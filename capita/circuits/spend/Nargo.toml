@@ -1,0 +1,7 @@
+[package]
+name = "spend"
+type = "bin"
+authors = ["Yash Goel"]
+
+[dependencies]
+common = { path = "../common" }

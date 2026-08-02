@@ -76,6 +76,11 @@ export class MerkleTree {
     return this.cachedRoot;
   }
 
+  /** Number of leaves inserted so far -- equally, the next insert's index. */
+  leafCount(): number {
+    return this.leaves.length;
+  }
+
   path(index: number): Path {
     if (index < 0 || index >= this.leaves.length) {
       throw new Error(`index ${index} out of range for a tree with ${this.leaves.length} leaves`);

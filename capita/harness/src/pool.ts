@@ -1,4 +1,5 @@
 import { MerkleTree } from "./merkle.js";
+import { paymentCommit } from "./notes.js";
 
 // Pool-operator state: the public, unencrypted side of the protocol. The
 // operator never sees secrets -- it sees proof outputs (commitments and
@@ -97,6 +98,44 @@ export class Pool {
       await this.tree.insert(proofOut.cT);
       this.seenEnrollments.add(key);
       this.rootHistory.add(this.tree.root().toString());
+    });
+  }
+
+  /**
+   * Accepts one transparent deposit: mints a payment note of `v` units for
+   * `ownerPk`, inserts its commitment into the tree, and returns the
+   * commitment with its leaf index.
+   *
+   * Transparent means `v` and `ownerPk` are operator-visible at mint time
+   * (this is the on-ramp; value enters against a public payment), so the
+   * commitment needs no hiding salt here. Its salt is instead fixed to the
+   * LEAF INDEX: the depositor reads it off the returned `index` and later
+   * supplies it as the note's `r` witness when spending, and repeated
+   * deposits of the same `(v, ownerPk)` still land on distinct commitments
+   * -- and therefore distinct nullifiers. Privacy begins at the first
+   * spend, which proves membership under a root without revealing which
+   * leaf.
+   *
+   * The value is checked against the spend circuit's u64 range up front --
+   * a larger `v` would mint a note the circuit can never consume -- and
+   * `paymentCommit` rejects a non-canonical `ownerPk` (p2's RangeError)
+   * before any state changes, preserving validate-then-mutate. The whole
+   * body is one serialized operation (class invariant), so the index read
+   * before the insert is the index the leaf lands on.
+   */
+  async deposit(
+    v: bigint,
+    ownerPk: bigint,
+  ): Promise<{ commit: bigint; index: number }> {
+    return this.serialize(async () => {
+      if (v < 0n || v >= 1n << 64n) {
+        throw new RangeError(`deposit value out of u64 range: ${v}`);
+      }
+      const index = this.tree.leafCount();
+      const commit = await paymentCommit(v, ownerPk, BigInt(index));
+      await this.tree.insert(commit);
+      this.rootHistory.add(this.tree.root().toString());
+      return { commit, index };
     });
   }
 }
