@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "vitest";
 import { MerkleTree } from "../src/merkle.js";
 import { closePoseidon, p2 } from "../src/poseidon.js";
-import { MERKLE_DEPTH } from "../src/constants.js";
+import { MERKLE_DEPTH, P } from "../src/constants.js";
 
 afterAll(async () => {
   await closePoseidon();
@@ -44,4 +44,23 @@ test("empty tree root is the precomputed all-zeros root, and stable across insta
     expected = await p2([expected, expected]);
   }
   expect(a.root()).toBe(expected);
+});
+
+// Regression: an out-of-range leaf used to enter `leaves` before rebuild()
+// hit p2's range guard, leaving an unhashable value inside the tree that
+// made every subsequent insert throw forever. The guard must run before
+// any mutation.
+test("rejected out-of-range leaf leaves the tree usable for subsequent inserts", async () => {
+  const t = new MerkleTree();
+  const emptyRoot = t.root();
+
+  await expect(t.insert(P + 5n)).rejects.toThrow(RangeError);
+  await expect(t.insert(-1n)).rejects.toThrow(RangeError);
+
+  // The rejected leaves left nothing behind: root unchanged, and the next
+  // insert lands at index 0 and hashes cleanly.
+  expect(t.root()).toBe(emptyRoot);
+  const i = await t.insert(42n);
+  expect(i).toBe(0);
+  expect(await MerkleTree.verify(t.root(), 42n, t.path(i))).toBe(true);
 });

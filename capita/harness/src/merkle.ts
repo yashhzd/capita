@@ -1,4 +1,4 @@
-import { MERKLE_DEPTH } from "./constants.js";
+import { MERKLE_DEPTH, P } from "./constants.js";
 import { p2 } from "./poseidon.js";
 
 export interface Path {
@@ -55,6 +55,13 @@ export class MerkleTree {
   private cachedRoot: bigint = ZERO_HASHES[MERKLE_DEPTH];
 
   async insert(leaf: bigint): Promise<number> {
+    // Same bounds as p2's own guard (poseidon.ts), but checked BEFORE the
+    // leaf enters `leaves`: rebuild() only hits p2's RangeError after the
+    // push, which would leave an unhashable value inside the tree and make
+    // every subsequent insert throw forever. Validate, then mutate.
+    if (leaf < 0n || leaf >= P) {
+      throw new RangeError(`insert leaf out of field range [0, P): ${leaf}`);
+    }
     const capacity = 2 ** MERKLE_DEPTH;
     if (this.leaves.length >= capacity) {
       throw new Error(`MerkleTree is full (max ${capacity} leaves)`);

@@ -23,6 +23,20 @@ export interface EnrollOutput {
   dNow: bigint;
 }
 
+/**
+ * CLASS INVARIANT (serialized acceptance): pool state -- `tree`, the three
+ * sets, `rootHistory`, `currentDay` -- is only read or written from inside
+ * a `serialize()`d operation, so operations run strictly one at a time, in
+ * call order, like an operator draining a submission queue. The
+ * check-then-mutate body of an acceptance operation spans an `await`
+ * (tree insertion hashes asynchronously), which is NOT atomic on its own:
+ * without the queue, two in-flight enrollments with the same E could both
+ * pass the duplicate check before either records its nullifier. Every
+ * acceptance method later tasks add (spend in Task 7, day advancement in
+ * Task 9) must wrap its body in `serialize()` exactly as `enroll` does --
+ * and must not call `serialize()` from inside an already-serialized
+ * operation, which would wait on itself.
+ */
 export class Pool {
   /** Current day index; advancing it is Task 9's job. */
   currentDay: bigint;
@@ -41,8 +55,23 @@ export class Pool {
    */
   rootHistory = new Set<string>();
 
+  /** Tail of the acceptance queue; see the class invariant above. */
+  private opQueue: Promise<unknown> = Promise.resolve();
+
   constructor(currentDay: bigint = 0n) {
     this.currentDay = currentDay;
+  }
+
+  /**
+   * Appends `op` to the acceptance queue: it starts only after every
+   * previously queued operation has settled, and its result (or thrown
+   * error) goes to this caller alone. A rejected operation does not stall
+   * the queue.
+   */
+  protected serialize<T>(op: () => Promise<T>): Promise<T> {
+    const result = this.opQueue.then(op);
+    this.opQueue = result.catch(() => {});
+    return result;
   }
 
   /**
@@ -50,18 +79,24 @@ export class Pool {
    * pool's, rejects a re-enrollment by the same person (same E), then
    * admits the genesis tally note into the tree.
    *
-   * Validation happens before any state change, so a rejected enrollment
-   * leaves the pool untouched. Throws `"wrong-day"` / `"duplicate-enrollment"`.
+   * The whole body is one serialized operation, and validation (including
+   * the tree's own leaf range check) precedes every state change -- so a
+   * rejected enrollment leaves the pool untouched, and concurrent calls
+   * cannot slip past the duplicate check. Throws `"wrong-day"` /
+   * `"duplicate-enrollment"`.
    */
   async enroll(proofOut: EnrollOutput): Promise<void> {
-    if (proofOut.dNow !== this.currentDay) {
-      throw new Error("wrong-day");
-    }
-    if (this.seenEnrollments.has(proofOut.E.toString())) {
-      throw new Error("duplicate-enrollment");
-    }
-    await this.tree.insert(proofOut.cT);
-    this.seenEnrollments.add(proofOut.E.toString());
-    this.rootHistory.add(this.tree.root().toString());
+    return this.serialize(async () => {
+      if (proofOut.dNow !== this.currentDay) {
+        throw new Error("wrong-day");
+      }
+      const key = proofOut.E.toString();
+      if (this.seenEnrollments.has(key)) {
+        throw new Error("duplicate-enrollment");
+      }
+      await this.tree.insert(proofOut.cT);
+      this.seenEnrollments.add(key);
+      this.rootHistory.add(this.tree.root().toString());
+    });
   }
 }

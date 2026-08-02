@@ -5,6 +5,7 @@ import { closePoseidon } from "../src/poseidon.js";
 import { MerkleTree } from "../src/merkle.js";
 import { enrollNullifier, personId, tallyCommit } from "../src/notes.js";
 import { Pool, type EnrollOutput } from "../src/pool.js";
+import { P } from "../src/constants.js";
 
 // Enrollment flow: execute the enrollment circuit to obtain its public
 // outputs (E, C_t_genesis), then feed them to Pool.enroll() the way an
@@ -139,5 +140,66 @@ test(
     // Rejected before any state change: E unrecorded, tree untouched.
     expect(pool.seenEnrollments.size).toBe(0);
     expect(pool.rootHistory.size).toBe(0);
+  },
+);
+
+// Regression: enroll() used to check seenEnrollments, then yield at
+// `await tree.insert`, and only record E afterwards -- so two un-awaited
+// calls with the same E could both pass the check inside that window and
+// both be accepted. Acceptance must be serialized.
+test(
+  "two in-flight enrollments with the same E cannot both be accepted",
+  { timeout: 60_000 },
+  async () => {
+    const pool = new Pool(DAY);
+    // Same person, fresh salts: same E, different C_t.
+    const first = await runEnrollment(5005n, 61n, DAY);
+    const second = await runEnrollment(5005n, 62n, DAY);
+    expect(second.E).toBe(first.E);
+
+    // Fired without awaiting: the pool must process them one at a time,
+    // in call order, so exactly the first wins.
+    const [ra, rb] = await Promise.allSettled([
+      pool.enroll(first),
+      pool.enroll(second),
+    ]);
+    expect(ra.status).toBe("fulfilled");
+    expect(rb.status).toBe("rejected");
+    expect((rb as PromiseRejectedResult).reason).toEqual(
+      new Error("duplicate-enrollment"),
+    );
+
+    // Exactly one genesis note exists for this person.
+    expect(pool.seenEnrollments.size).toBe(1);
+    expect(pool.rootHistory.size).toBe(1);
+    expect(
+      await MerkleTree.verify(pool.tree.root(), first.cT, pool.tree.path(0)),
+    ).toBe(true);
+    expect(() => pool.tree.path(1)).toThrow();
+  },
+);
+
+// Regression: a non-canonical C_t (>= P) used to pass enroll's checks and
+// then wedge inside MerkleTree.insert AFTER the leaf was stored, leaving
+// an unhashable value that made every later enrollment fail forever.
+test(
+  "a non-canonical C_t is rejected without poisoning the pool",
+  { timeout: 60_000 },
+  async () => {
+    const pool = new Pool(DAY);
+    const good = await runEnrollment(6006n, 71n, DAY);
+    // Garbage submission: a verified proof can never output C_t >= P, but
+    // the operator must not fall over on unverified input.
+    const bad: EnrollOutput = { E: good.E + 1n, cT: P + 5n, dNow: DAY };
+
+    await expect(pool.enroll(bad)).rejects.toThrow(RangeError);
+
+    // The rejection recorded nothing, and the pool still works.
+    expect(pool.seenEnrollments.size).toBe(0);
+    expect(pool.rootHistory.size).toBe(0);
+    await pool.enroll(good);
+    expect(
+      await MerkleTree.verify(pool.tree.root(), good.cT, pool.tree.path(0)),
+    ).toBe(true);
   },
 );
