@@ -1,0 +1,25 @@
+{
+  "name": "harness",
+  "version": "1.0.0",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "tsx": "^4.23.3",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "@aztec/bb.js": "^5.1.0",
+    "@noir-lang/noir_js": "1.0.0-beta.22"
+  },
+  "type": "module"
+}
