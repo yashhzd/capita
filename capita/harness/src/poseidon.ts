@@ -1,4 +1,5 @@
 import { Barretenberg } from "@aztec/bb.js";
+import { P } from "./constants.js";
 
 // @aztec/bb.js exposes no free-standing `poseidon2Hash` function -- the real
 // API is instance-based: construct a Barretenberg instance, then call
@@ -22,6 +23,14 @@ function getBarretenberg(): Promise<Barretenberg> {
 }
 
 function toBytes32(value: bigint): Uint8Array {
+  // Range guard: a value outside [0, P) would not throw here on its own --
+  // negatives sign-extend under bigint `&` and values >= 2^256 silently
+  // truncate to their low 32 bytes. Grumpkin *scalars* live mod a larger
+  // modulus than P, so this is a live hazard, not a theoretical one; fail
+  // loudly at the source instead.
+  if (value < 0n || value >= P) {
+    throw new RangeError(`p2 input out of field range [0, P): ${value}`);
+  }
   const bytes = new Uint8Array(32);
   let remaining = value;
   for (let i = 31; i >= 0; i--) {
