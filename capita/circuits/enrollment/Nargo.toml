@@ -1,0 +1,7 @@
+[package]
+name = "enrollment"
+type = "bin"
+authors = ["Yash Goel"]
+
+[dependencies]
+common = { path = "../common" }
