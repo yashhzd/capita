@@ -12,6 +12,7 @@ use std::embedded_curve_ops::{
     EmbeddedCurvePoint, EmbeddedCurveScalar, fixed_base_scalar_mul, multi_scalar_mul,
 };
 use std::hash::poseidon2_permutation;
+use std::static_assert;
 
 // Protocol constants, transcribed from harness/src/constants.ts. APP_SCOPE
 // stays in hex on both sides so the two files diff cleanly against each
@@ -43,6 +44,11 @@ global TWO_POW_64: Field = 18446744073709551616;
 /// the tail block folded into the last permutation, which is what the
 /// eager per-block loop below computes.
 pub fn p2<let N: u32>(input: [Field; N]) -> Field {
+    // Barretenberg's arity-0 sponge still permutes once before squeezing;
+    // the loop below would instead return state[0] = 0 without permuting.
+    // No protocol formula hashes an empty message, so rather than matching
+    // that edge, make it unreachable at compile time.
+    static_assert(N > 0, "p2: empty input is outside the sponge contract");
     let mut state: [Field; P2_STATE] = [0, 0, 0, (N as Field) * TWO_POW_64];
     for block in 0..(N + P2_RATE - 1) / P2_RATE {
         for j in 0..P2_RATE {
@@ -176,6 +182,31 @@ mod tests {
     fn p2_arity_is_part_of_the_domain() {
         assert(p2([5]) != p2([5, 0]));
         assert(p2([5, 0]) != p2([5, 0, 0]));
+    }
+
+    #[test]
+    fn p2_matches_bbjs_at_arities_6_to_9() {
+        // Known-answer pins for the sponge's block schedule beyond the
+        // arities the consistency gate compares live against bb.js (1-5):
+        // 6 = two full rate-3 blocks, 7 and 8 = two blocks plus a tail of
+        // one and two, 9 = three full blocks. Reference values computed
+        // with @aztec/bb.js poseidon2Hash over the inputs [1..N].
+        assert_eq(
+            p2([1, 2, 3, 4, 5, 6]),
+            0x07f57fcda925c06dc0a311f3f17fa0218e079b514552744a25ba8a74ee8c9e7a,
+        );
+        assert_eq(
+            p2([1, 2, 3, 4, 5, 6, 7]),
+            0x16f929bc0d216df4b05bdc44222463edf2b9791bd949ab926eebda06a502d238,
+        );
+        assert_eq(
+            p2([1, 2, 3, 4, 5, 6, 7, 8]),
+            0x01dec21c6e1b30609eda618d7e35e5d9d6152f8fa67320d939c1a89603647142,
+        );
+        assert_eq(
+            p2([1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            0x174b592c95a1811beff20ff96e1276cad3d155670a909f90c3658841f0f70fea,
+        );
     }
 
     #[test]

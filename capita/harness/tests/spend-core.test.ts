@@ -11,7 +11,9 @@ import {
   tallyCommit,
 } from "../src/notes.js";
 import { Pool, type EnrollOutput } from "../src/pool.js";
-import { MERKLE_DEPTH } from "../src/constants.js";
+import { MERKLE_DEPTH, T_THRESHOLD } from "../src/constants.js";
+import { GRUMPKIN_ORDER } from "../src/grumpkin.js";
+import { encrypt, keygen, type Limbs } from "../src/elgamal.js";
 
 // Spend circuit core against live pool state: enroll a person, deposit a
 // transparent payment note, then execute the spend circuit over the real
@@ -19,13 +21,22 @@ import { MERKLE_DEPTH } from "../src/constants.js";
 // TypeScript formulas. Per the plan, the executed witness's return value
 // stands in for a verified proof until Task 11; spend ACCEPTANCE (root and
 // nullifier bookkeeping on the pool) is Task 9.
+//
+// Since Task 8 every spend also carries the uniform disclosure memo as
+// public inputs; executeSpend below derives the required message the same
+// way the wallet does and encrypts it to the auditor key. Both flows here
+// stay under the threshold, so both memos are dummies -- the threshold
+// branch itself is exercised in spend-threshold.test.ts.
 
 const SPEND_DIR = fileURLToPath(new URL("../../circuits/spend/", import.meta.url));
 const ENROLLMENT_DIR = fileURLToPath(
   new URL("../../circuits/enrollment/", import.meta.url),
 );
 const toHex = (v: bigint) => "0x" + v.toString(16);
+const MASK_128 = (1n << 128n) - 1n;
 const DAY = 20260802n;
+const ASK = 271828n;
+const APK = keygen(ASK);
 
 // Same repackaging as enroll.test.ts: circuit outputs plus the public
 // d_now input form the operator-visible enrollment message.
@@ -59,13 +70,23 @@ interface SpendWitness {
   rT: bigint;
   pathT: Path;
   rTNew: bigint;
+  rEnc: bigint;
   root: bigint;
   dNow: bigint;
 }
 
 // Encodes a spend witness the way noir_js expects it: fields as 0x-hex,
-// Merkle index bits as booleans (harness 0/1 -> false/true).
-function executeSpend(w: SpendWitness) {
+// Merkle index bits as booleans (harness 0/1 -> false/true), the memo
+// scalar as canonical 128-bit limbs (Task 5 convention), and the memo the
+// flow requires encrypted to the auditor key as public inputs.
+async function executeSpend(w: SpendWitness) {
+  const sNew = w.dNow === w.dOld ? w.sOld + w.v1 : w.v1;
+  const msg: Limbs =
+    sNew > T_THRESHOLD
+      ? [1n, await personId(w.personSecret), sNew, w.dNow]
+      : [0n, 0n, 0n, 0n];
+  const memo = await encrypt(msg, APK, w.rEnc);
+  const rEncCanonical = ((w.rEnc % GRUMPKIN_ORDER) + GRUMPKIN_ORDER) % GRUMPKIN_ORDER;
   return execute(SPEND_DIR, {
     person_secret: toHex(w.personSecret),
     v_in: toHex(w.vIn),
@@ -84,8 +105,15 @@ function executeSpend(w: SpendWitness) {
     path_t_siblings: w.pathT.siblings.map(toHex),
     path_t_indices: w.pathT.indices.map((bit) => bit === 1),
     r_t_new: toHex(w.rTNew),
+    r_enc_lo: toHex(rEncCanonical & MASK_128),
+    r_enc_hi: toHex(rEncCanonical >> 128n),
     root: toHex(w.root),
     d_now: toHex(w.dNow),
+    t_threshold: toHex(T_THRESHOLD),
+    apk_x: toHex(APK.x),
+    apk_y: toHex(APK.y),
+    c1: [toHex(memo.c1.x), toHex(memo.c1.y)],
+    ct: memo.ct.map(toHex),
   });
 }
 
@@ -145,6 +173,7 @@ test(
       rT,
       pathT: pool.tree.path(0),
       rTNew,
+      rEnc: 501n,
       root,
       dNow: DAY,
     });
@@ -226,6 +255,7 @@ test(
         rT,
         pathT: pool.tree.path(0),
         rTNew: 555n,
+        rEnc: 502n,
         root,
         dNow: DAY,
       }),
