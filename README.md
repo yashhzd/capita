@@ -4,7 +4,7 @@
 
 A research prototype exploring one question: can a regulatory volume limit be enforced *per unique human*, across any number of unlinkable accounts, in a permissionless private payment system, with no registration authority, no central identity database, and without the per-person state becoming a tracking tag?
 
-> **Status: work in progress (research code).** Tasks 8 of 14 complete. The circuits and harness are tested and green, but the credential layer is mocked and real proof generation is not wired up yet. See [Current status](#current-status) for exactly what does and does not work. Not audited. Do not use with real money.
+> **Status: work in progress (research code).** 8 of 14 planned tasks complete. The circuits and harness are tested and green, but the credential layer is mocked and real proof generation is not wired up yet. See [Current status](#current-status) for exactly what does and does not work. Not audited. Do not use with real money.
 
 ## The problem
 
