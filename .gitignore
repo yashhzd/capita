@@ -1,2 +1,4 @@
 node_modules/
 capita/circuits/*/target/
+.superpowers/
+.serena/

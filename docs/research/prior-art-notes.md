@@ -1,6 +1,6 @@
 # Prior-art notes (condensed from three adversarial sweeps, 2026-08-01/02)
 
-Verdict that drives the paper: per-person cumulative AMOUNT limits via self-sovereign personhood in permissionless shielded payments = unclaimed. Every neighboring cell occupied. this file is the citable skeleton for the Related Work section.
+Verdict that drives the paper: per-person cumulative AMOUNT limits via self-sovereign personhood in permissionless shielded payments = unclaimed. Every neighboring cell occupied. This file is the citable skeleton for the Related Work section.
 
 ## The three-layer map (Related Work structure)
 
