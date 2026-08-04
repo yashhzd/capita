@@ -109,6 +109,8 @@ capita/
     src/           field arithmetic, Poseidon2, Merkle tree, Grumpkin,
                    ElGamal, notes, pool state machine, auditor
     tests/         vitest suites
+    bench/         UltraHonk proving benchmark (produces the paper's numbers)
+paper/             paper source (LaTeX) and compiled PDF
 docs/
   spec/            full design specification
   plan/            implementation plan
@@ -167,15 +169,40 @@ Working:
 - spend circuit: payment validity, tally consume and update, business-day reset
 - threshold branch with uniform disclosure memos, including in-circuit encryption correctness
 
+Measured, on an Apple M4 Max (14 cores, 36 GB), median of 10 runs, all proofs verifying:
+
+| Circuit | Gates | Public inputs | Prove | Verify | Proof |
+|---|---:|---:|---:|---:|---:|
+| Enrollment | 322 | 3 | 47.4 ms | 2.73 ms | 14,656 B |
+| Spend, below threshold | 8,094 | 16 | 110.1 ms | 2.75 ms | 14,656 B |
+| Spend, above threshold | 8,094 | 16 | 110.2 ms | 2.74 ms | 14,656 B |
+
+The last two rows are the point. A spend that crosses the disclosure threshold and one that
+doesn't cost **110.2 ms vs 110.1 ms** and emit byte-identical proofs and memos. The uniformity
+the privacy argument depends on is measured, not assumed: a timing or size gap correlated with
+threshold crossing would be a privacy defect that no amount of ciphertext indistinguishability
+would repair. Reproduce with `npx tsx bench/spend-bench.ts`.
+
 Not done yet:
 
-- **Real proof generation.** Circuits are verified by constraint satisfaction through `nargo test`; the UltraHonk prove and verify path is still stubbed out. This is the next substantial piece of work.
 - **The credential layer is mocked.** The prototype takes a pre-verified `person_secret` behind the interface in spec §7.1 rather than parsing and verifying a real passport. Published zkPassport proving costs will be cited for the end-to-end estimate. This is disclosed plainly in the paper too, since it is the difference between "the accounting works" and "the whole thing works."
-- End-to-end scenario walkthrough, benchmarks, and the paper draft.
+- **Proving is benchmarked, not yet integrated.** `bench/spend-bench.ts` generates and verifies real UltraHonk proofs, which is where the numbers above come from. The `prove()` and `verify()` wrappers in `harness/src/prove.ts` are still stubs, and the pool does not yet bind verified public inputs to accepted state; that integration is the next substantial piece of work.
+- Pool acceptance rules, the end-to-end scenario walkthrough, and the remaining paper sections.
 
 ## Paper
 
-The prototype is the evaluation section of a paper in progress. Target is an ePrint preprint first, for the priority timestamp, then a venue such as Financial Cryptography or AFT. The design specification and prior-art map in `docs/` are the working drafts of the construction and related-work sections.
+A draft is in [`paper/capita.tex`](paper/capita.tex), with the compiled PDF alongside it. It
+gives game-based definitions and proof sketches for person-binding, limit soundness,
+unlinkability, and disclosure correctness, and uses the prototype as its evaluation section.
+Target is an ePrint preprint first, for the priority timestamp, then a venue such as Financial
+Cryptography or AFT. See [`paper/README.md`](paper/README.md) for how to build it, how to
+reproduce every number in it, and what remains open before submission.
+
+One result there is worth flagging as a caveat rather than a finding: the threshold comparison
+gadget is sound only for subtotals below 2^129, not for all field elements. Every reachable
+subtotal is below 2^80 by construction, so the precondition holds, but it is stated explicitly
+in the paper because an earlier version of this implementation documented the gadget as sound
+unconditionally, and it is not.
 
 ## License
 
