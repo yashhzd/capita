@@ -7,7 +7,6 @@
 \usepackage{amsmath,amssymb,amsthm}
 \usepackage{booktabs}
 \usepackage{array}
-\usepackage{authblk}
 \usepackage{microtype}
 \usepackage[hidelinks]{hyperref}
 \usepackage{url}
@@ -36,10 +35,22 @@
 
 \title{\textbf{Capita: Person-Bound Spending Limits for Shielded Payments\\ Without a Registration Authority}}
 
-\author[1]{Yash Goel\thanks{\texttt{yg7728@srmist.edu.in}}}
-\author[2]{Umamaheswari K. M.\thanks{\texttt{umamahek@srmist.edu.in}}}
-\affil[1]{SRM Institute of Science and Technology, Kattankulathur, India 603203}
-\affil[2]{Associate Professor, Department of Computing Technologies, School of Computing,\protect\\ College of Engineering and Technology, SRM Institute of Science and Technology,\protect\\ Kattankulathur, India 603203}
+% Each author's designation sits directly beneath their own name. The
+% numbered-superscript style pools every affiliation into one list below
+% both names, which reads as though both titles apply to both authors.
+\author{%
+\footnotesize
+\begin{tabular}{@{}c@{\hspace{0.9cm}}c@{}}
+{\normalsize\textbf{Yash Goel}} & {\normalsize\textbf{Umamaheswari K. M.}} \\[2pt]
+B.Tech, Computer Science and Engineering (Core) & Associate Professor \\
+Department of Computing Technologies & Department of Computing Technologies \\
+School of Computing & School of Computing \\
+College of Engineering and Technology & College of Engineering and Technology \\
+SRM Institute of Science and Technology & SRM Institute of Science and Technology \\
+Kattankulathur, India 603203 & Kattankulathur, India 603203 \\
+\texttt{yg7728@srmist.edu.in} & \texttt{umamahek@srmist.edu.in} \\
+\end{tabular}%
+}
 
 \date{}
 
