@@ -60,19 +60,24 @@ Kattankulathur, India 603203 & Kattankulathur, India 603203 \\
 \maketitle
 
 \begin{abstract}
-Financial regulation in both the United States and the European Union requires transaction limits to be enforced \emph{per person}, aggregated across every account that person controls. Title 31 CFR 1010.313(b) obliges a bank to aggregate same-person currency transactions across accounts within one business day; Article 35(8) of the European digital euro proposal mandates per-person holding limits spanning all payment service providers. No private payment system can satisfy either rule. Systems that enforce per-user limits do so through a registration authority holding a database of enrolled identities, which reintroduces the central record that privacy technology exists to avoid; permissionless shielded pools avoid the registry but can bind limits only to accounts, and accounts are free to create, so a limit of $T$ becomes $nT$ for a user willing to open $n$ wallets.
+Financial regulation in both the United States and the European Union requires transaction limits to be enforced \emph{per person}, aggregated across every account that person controls. Title 31 CFR 1010.313(b) obliges a bank to aggregate same-person currency transactions across accounts within one business day; the European digital euro proposal obliges payment service providers to enforce a per-person holding limit, and authorizes a central registry of user identifiers so that the limit can be applied across all providers. No private payment system can satisfy either rule. Systems that enforce per-user limits do so through a registration authority holding a database of enrolled identities, which reintroduces the central record that privacy technology exists to avoid; permissionless shielded pools avoid the registry but can bind limits only to accounts, and accounts are free to create, so a limit of $T$ becomes $nT$ for a user willing to open $n$ wallets.
 
 We present Capita, a construction that occupies the empty cell: cumulative per-person spending limits in a permissionless shielded pool, with no registrar, no central identity database, and no persistent linkable identifier. Three ideas combine. First, identity is derived from a government-signed electronic passport rather than issued by an operator, so the sybil bound requires no enrollment authority. Second, and centrally, the per-person running subtotal is stored as a \emph{tally note} in the same commitment Merkle tree as monetary notes, spent and recreated by the same nullifier machinery; the per-person state therefore inherits the pool's unlinkability instead of becoming a tracking tag. Third, every spend carries an identically shaped ciphertext to an auditor: a genuine disclosure record above the threshold, and a fixed dummy below it. The compliance mechanism therefore does not itself signal which transactions crossed the limit.
 
 We give game-based definitions for person-binding, limit soundness, unlinkability, and disclosure correctness, together with proof sketches, and report a working implementation in Noir over BN254 with a Grumpkin-embedded encryption gadget. The spend circuit is 8{,}094 UltraHonk gates and proves in 110\,ms with 2.7\,ms verification on commodity hardware. Proving cost below and above the disclosure threshold is measured at 110.1\,ms and 110.2\,ms respectively, so the uniformity on which the privacy argument depends is observable rather than assumed. We are explicit about what is not solved, including multiple citizenship, consenting proxies, and the mocked credential layer of the present prototype.
 \end{abstract}
 
+\noindent\textbf{Keywords:} zero-knowledge proofs $\cdot$ shielded payments $\cdot$ proof of personhood $\cdot$ regulatory compliance $\cdot$ spending limits $\cdot$ auditability $\cdot$ central bank digital currency
+
+\medskip
+
 \section{Introduction}
+\label{sec:intro}
 
 Privacy technology for payments and financial regulation are usually presented as opposing forces, with any concrete system landing somewhere on a line between them. That framing obscures a more specific and more tractable problem. The regulations that matter here are not vague appeals to transparency; they are written rules with precise semantics, and those semantics turn out to be incompatible not with privacy in general but with one particular design choice that every deployed private payment system makes.
 
 \paragraph{Two rules that say ``person.''}
-Title 31 of the U.S. Code of Federal Regulations, \S\,1010.313(b), requires a financial institution to aggregate multiple currency transactions and file a report when the total exceeds the threshold \emph{for the same person on the same business day}, across all of that person's accounts~\cite{cfr1010313}. The per-person scope is deliberate: aggregating per account would leave the rule trivially defeated by splitting funds. In December 2020, FinCEN proposed extending essentially this rule to convertible virtual currency~\cite{fincennprm}. In the European Union, Article 35(8) of the digital euro proposal mandates per-person holding limits that hold across \emph{all} payment service providers~\cite{digitaleuro}. The European Central Bank's implementation is a central registry of user identifiers, the Single Access Point. The joint opinion of the European Data Protection Board and the European Data Protection Supervisor challenged that design on proportionality grounds and stated that decentralized storage of such identifiers is technically feasible~\cite{edpb2023}. To our knowledge, no such design has been published.
+Title 31 of the U.S. Code of Federal Regulations, \S\,1010.313(b), requires a financial institution to aggregate multiple currency transactions and file a report when the total exceeds the threshold \emph{for the same person on the same business day}, across all of that person's accounts~\cite{cfr1010313}. The per-person scope is deliberate: aggregating per account would leave the rule trivially defeated by splitting funds. In December 2020, FinCEN proposed extending essentially this rule to convertible virtual currency~\cite{fincennprm}. In the European Union, the digital euro proposal obliges payment service providers to enforce a per-person holding limit (Article 16(1)), and Article 35(8) authorizes the European Central Bank, alone or jointly with national central banks, to establish a \emph{single access point} holding digital euro user identifiers together with their associated holding limits, precisely so that the limit can be enforced across \emph{all} providers~\cite{digitaleuro}. That single access point is, in plain terms, a central registry of who holds what. The joint opinion of the European Data Protection Board and the European Data Protection Supervisor challenged it, finding that the proposal ``does not sufficiently clarify the necessity and proportionality'' of the processing involved, and recommending that the co-legislators specify ``the technical measures that would enable a decentralised storage''. Its accompanying footnote is more explicit still: acknowledging that verifying one user's overall holding limit may require information from several accounts, it urges that the implementation ``should explore the option of using PETs that could avoid storing centrally personal data used to perform computations and take relevant decisions''~\cite[paras.~40--41]{edpb2023}. That is a data protection regulator asking, in as many words, for a privacy-preserving mechanism that enforces a per-person limit without a central store of who holds what. To our knowledge, no such design has been published.
 
 \paragraph{The gap.}
 Consider the two families of systems that exist. Registrar-based private payment systems such as UTT~\cite{utt}, PRCash~\cite{prcash}, PEReDi~\cite{peredi} and Platypus~\cite{platypus} enforce genuine per-user limits, but only because a registration authority maintains a database mapping users to credentials. That database is the artifact the technology was meant to eliminate, and it is a standing compromise, subpoena, and abuse target. Permissionless shielded pools such as Zcash~\cite{zcash}, and the deployed pool designs that followed it, hold no identity data at all, but consequently have no notion of ``person.'' Any limit they impose binds to a key or an account. Opening a second wallet costs nothing, so a daily cap of $T$ is in practice a cap of $nT$.
@@ -91,8 +96,6 @@ Capita resolves this by refusing to give the per-person state a home of its own.
 \item We implement the construction in Noir over BN254 and report measured circuit sizes, proving times, verification times, and proof sizes for enrollment and spend, at both threshold positions (Section~\ref{sec:eval}).
 \end{enumerate}
 
-\label{sec:intro}
-
 \section{Related Work}
 \label{sec:related}
 
@@ -104,15 +107,15 @@ Deriving a sybil-resistant identity from a government credential without involvi
 
 \subsection{Layer 2: unlinkable cumulative accounting}
 
-Accumulating a value across unlinkable sessions is also well studied. BBA+~\cite{bbaplus} and updatable anonymous credentials~\cite{uacs} let a user carry a token encoding a running total, updated unlinkably, with double-spend detection. These schemes are \emph{key-bound}: the accumulator belongs to whoever holds the secret, and one human may hold many. They therefore provide unlinkable accounting without sybil resistance, which is exactly the half of the problem that personhood solves and they do not. On the count-based side, compact e-cash and e-token schemes~\cite{chl2006}, $k$-times anonymous authentication, and more recently EARLT~\cite{earlt}, which reveals identity above $N$ \emph{uses}, all share our enforcement shape but operate on counts rather than amounts. Moving from counts to amounts is not cosmetic: a count is bounded by construction and fits a small field, whereas a monetary subtotal requires range discipline that interacts subtly with the threshold comparison, as Section~\ref{sec:security} shows.
+Accumulating a value across unlinkable sessions is also well studied. BBA+~\cite{bbaplus} and updatable anonymous credentials~\cite{uacs} let a user carry a token encoding a running total, updated unlinkably, with double-spend detection. These schemes are \emph{key-bound}: the accumulator belongs to whoever holds the secret, and one human may hold many. They therefore provide unlinkable accounting without sybil resistance, which is exactly the half of the problem that personhood solves and they do not. On the count-based side, compact e-cash and e-token schemes~\cite{chl2006}, $k$-times anonymous authentication, and more recently everlasting anonymous rate-limited tokens~\cite{earlt}, where observing more than $N$ tokens in a single context reveals the user's identity, all share our enforcement shape but operate on counts rather than amounts. Moving from counts to amounts is not cosmetic: a count is bounded by construction and fits a small field, whereas a monetary subtotal requires range discipline that interacts subtly with the threshold comparison, as Section~\ref{sec:security} shows.
 
 \subsection{Layer 3: limits and disclosure in payment systems}
 
-Threshold-triggered disclosure in a payment system is old and, importantly, deployed. Camenisch, Hohenberger and Lysyanskaya~\cite{chl2006} balance accountability and privacy with e-cash whose anonymity is forfeited beyond a spending limit; Garman, Green and Miers~\cite{ggm16} add accountable privacy to decentralized anonymous payments; PRCash~\cite{prcash} enforces regulator-visible limits on transaction value. Espresso's Configurable Asset Privacy (CAP)~\cite{cap} enforces in-circuit the disjunction that a viewing key is absent, or a threshold bit is set, or the memo is a correct encryption of the transaction record; it has been deployed since 2022. We do not claim novelty for threshold-triggered disclosure. Capita cites and extends this line by moving the trigger from a per-transaction predicate to a cumulative per-person one, and by requiring memo uniformity, which a per-transaction trigger does not need in the same way.
+Threshold-triggered disclosure in a payment system is old and, importantly, deployed. Camenisch, Hohenberger and Lysyanskaya~\cite{chl2006} give e-cash in which anonymity holds only while the user stays below a publicly known spending limit \emph{with any single merchant}, which makes it the closest prior work on limits over amounts rather than counts; the limit is nonetheless per merchant rather than per person, and coins are withdrawn from a bank that knows who withdrew them; Garman, Green and Miers~\cite{ggm16} add accountable privacy to decentralized anonymous payments; PRCash~\cite{prcash} enforces regulator-visible limits on transaction value. Espresso's Configurable Asset Privacy (CAP)~\cite{cap} enforces in-circuit the disjunction that a viewing key is absent, or a threshold bit is set, or the memo is a correct encryption of the transaction record; it has been deployed since 2022. We do not claim novelty for threshold-triggered disclosure. Capita cites and extends this line by moving the trigger from a per-transaction predicate to a cumulative per-person one, and by requiring memo uniformity, which a per-transaction trigger does not need in the same way.
 
-The registrar family is broad: in addition to those already named, AQQUA~\cite{aqqua} supports audits over a private ledger, Paxpay~\cite{paxpay} enforces a lifetime cap under a regulator key, and further designs address auditability with a designated authority~\cite{wdap,dart}. Every one of them obtains person-binding from a registration step. Surveys of the area~\cite{survey,sok} catalogue ``anonymity budget'' and ``operating limit'' mechanisms but treat multi-account evasion and personhood only in passing, which we read as confirmation that the design point is unoccupied rather than as evidence it is uninteresting.
+The registrar family is broad: in addition to those already named, AQQUA~\cite{aqqua} supports audits over a private ledger, Paxpay~\cite{paxpay} supports regulated transfer limits and address restrictions in an asynchronous, consensus-free setting, and further designs address auditability with a designated authority~\cite{wdap,dart}. Every one of them obtains person-binding from a registration step. Surveys of the area~\cite{survey,sok} catalogue ``anonymity budget'' and ``operating limit'' mechanisms but treat multi-account evasion and personhood only in passing, which we read as confirmation that the design point is unoccupied rather than as evidence it is uninteresting.
 
-Finally, Friolo et al.~\cite{friolo} argue against persistent payer state on the grounds that it constitutes a coercion surface. We take the objection seriously and answer it in Section~\ref{sec:discussion}: our state is self-custodied and cryptographically unlinkable, and disclosure is both threshold-gated and pseudonymous, though we do not claim the residual risk is zero.
+Finally, Friolo et al.~\cite{friolo} adopt as an explicit design principle that a payer should not be required to retain secrets arising from one transaction until the next, arguing that this property is essential both to reasoning about the security of asset storage and to the risk of blackmail or coercion used to extract payment history. Capita retains exactly such state, so the principle is in direct tension with our design rather than adjacent to it. We engage it in Section~\ref{sec:discussion}.
 
 \subsection{Position}
 
@@ -478,7 +481,7 @@ A person holding two passports obtains two limit slots, hence $2T$. This is boun
 A person routing spends through another consenting person's allowance is a conspiracy of humans, addressed by law rather than cryptography. The system still bounds total flow to $q \cdot T$ for $q$ participating humans, which we state as a property rather than conceal as a defect: it is precisely the guarantee the banking rule provides, since a bank likewise cannot prevent one customer from asking another to make a deposit.
 
 \paragraph{Coercion and the persistent-state objection.}
-Friolo et al.~\cite{friolo} argue that persistent payer state creates a coercion surface. Our state is self-custodied, unlinkable to observers, and disclosed only above threshold and only pseudonymously, which narrows the surface considerably. It does not eliminate it: a party who compels a person to reveal $\psec$ obtains their history. We regard this as a genuine residual risk and not as an argument against the design, since the alternative on offer, a central registry, is strictly worse under the same threat.
+Friolo et al.~\cite{friolo} hold that a payer should not have to carry secrets from one transaction to the next, citing asset-storage security and the use of blackmail or coercion to extract payment history. Capita violates that principle by construction: the tally note is precisely such a carried secret, and honesty requires treating this as a real cost rather than a presentational detail. Three things bound it. The state is self-custodied rather than deposited with an operator, so there is no aggregated target to compromise. It is unlinkable to observers, so it does not mark its holder in the interim. And what compulsion yields is one person's own spending history, not a graph implicating counterparties. None of this eliminates the risk: a party who compels a person to surrender $\psec$ learns that history. We record it as a genuine residual cost of person-bound limits, and observe that the deployed alternative, a central registry, exposes the same history to a far wider set of parties with no coercion required at all.
 
 \paragraph{The pseudonymity objection.}
 A recurring critique of one-per-person identity systems is that they collapse pseudonymity: if everyone has exactly one identity, everyone is trackable. Our answer is structural. A person holds one \emph{limit}, but arbitrarily many unlinkable accounts, and the per-person state is never visible as a repeated value. What is unique is a quantity nobody can observe.
@@ -504,28 +507,28 @@ U.S. Code of Federal Regulations, Title 31 \S\,1010.313, \emph{Aggregation}. Fin
 Financial Crimes Enforcement Network. \emph{Requirements for Certain Transactions Involving Convertible Virtual Currency or Digital Assets}. Notice of Proposed Rulemaking, 85 FR 83840, December 2020.
 
 \bibitem{digitaleuro}
-European Commission. \emph{Proposal for a Regulation on the establishment of the digital euro}, COM(2023) 369, Article 35(8), 2023.
+European Commission. \emph{Proposal for a Regulation of the European Parliament and of the Council on the establishment of the digital euro}, COM(2023) 369 final, 28 June 2023. Article 16(1) (holding limits); Article 35(8) (single access point of user identifiers).
 
 \bibitem{edpb2023}
-European Data Protection Board and European Data Protection Supervisor. \emph{Joint Opinion 02/2023 on the Proposal for a Regulation on the establishment of the digital euro}, 2023.
+European Data Protection Board and European Data Protection Supervisor. \emph{EDPB-EDPS Joint Opinion 02/2023 on the Proposal for a Regulation of the European Parliament and of the Council on the establishment of the digital euro}, adopted 18 October 2023.
 
 \bibitem{zcash}
 D. Hopwood, S. Bowe, T. Hornby, and N. Wilcox. \emph{Zcash Protocol Specification}. Electric Coin Company.
 
 \bibitem{chl2006}
-J. Camenisch, S. Hohenberger, and A. Lysyanskaya. Balancing accountability and privacy using E-cash. In \emph{Security and Cryptography for Networks (SCN)}, 2006.
+J. Camenisch, S. Hohenberger, and A. Lysyanskaya. Balancing accountability and privacy using e-cash (extended abstract). In \emph{Security and Cryptography for Networks (SCN)}, LNCS 4116, pages 141--155. Springer, 2006.
 
 \bibitem{ggm16}
-C. Garman, M. Green, and I. Miers. Accountable privacy for decentralized anonymous payments. Cryptology ePrint Archive, Report 2016/061, 2016.
+C. Garman, M. Green, and I. Miers. Accountable privacy for decentralized anonymous payments. In \emph{Financial Cryptography and Data Security (FC)}, 2016. Cryptology ePrint Archive, Report 2016/061.
 
 \bibitem{prcash}
 K. W\"ust, K. Kostiainen, V. Capkun, and S. Capkun. PRCash: Fast, private and regulated transactions for digital currencies. Cryptology ePrint Archive, Report 2018/412, 2018.
 
 \bibitem{platypus}
-K. W\"ust, K. Kostiainen, N. Delius, and S. Capkun. Platypus: A central bank digital currency with unlinkable transactions and privacy preserving regulation. Cryptology ePrint Archive, Report 2021/1443, 2021.
+K. W\"ust, K. Kostiainen, N. Delius, and S. Capkun. Platypus: A central bank digital currency with unlinkable transactions and privacy preserving regulation. In \emph{ACM CCS}, 2022. Cryptology ePrint Archive, Report 2021/1443.
 
 \bibitem{peredi}
-A. Kiayias, M. Kohlweiss, and A. Sarencheh. PEReDi: Privacy-enhanced, regulated and distributed central bank digital currencies. Cryptology ePrint Archive, Report 2022/974, 2022.
+A. Sarencheh, A. Kiayias, and M. Kohlweiss. PEReDi: Privacy-enhanced, regulated and distributed central bank digital currencies. In \emph{ACM CCS}, 2022. Cryptology ePrint Archive, Report 2022/974.
 
 \bibitem{utt}
 A. Tomescu, A. Bhat, B. Applebaum, I. Abraham, G. Gueta, B. Pinkas, and A. Yanai. UTT: Decentralized ecash with accountable privacy. Cryptology ePrint Archive, Report 2022/452, 2022.
@@ -534,16 +537,16 @@ A. Tomescu, A. Bhat, B. Applebaum, I. Abraham, G. Gueta, B. Pinkas, and A. Yanai
 Espresso Systems. \emph{Configurable Asset Privacy (CAP)}. \url{https://github.com/EspressoSystems/cap}, 2022.
 
 \bibitem{zkcreds}
-M. Rosenberg, J. White, C. Garman, and I. Miers. zk-creds: Flexible anonymous credentials from ZkSNARKs and existing identity infrastructure. In \emph{IEEE Symposium on Security and Privacy}, 2023. Cryptology ePrint Archive, Report 2022/878.
+M. Rosenberg, J. White, C. Garman, and I. Miers. zk-creds: Flexible anonymous credentials from zkSNARKs and existing identity infrastructure. In \emph{IEEE Symposium on Security and Privacy}, 2023. Cryptology ePrint Archive, Report 2022/878.
 
 \bibitem{syra}
-E. Crites, A. Kiayias, M. Kohlweiss, and A. Sarencheh. SyRA: Sybil-resilient anonymous signatures with applications to decentralized identity. Cryptology ePrint Archive, Report 2024/379, 2024.
+E. Crites, A. Kiayias, M. Kohlweiss, and A. Sarencheh. SyRA: Sybil-resilient anonymous signatures with applications to decentralized identity. In \emph{ACM CCS}, 2025. Cryptology ePrint Archive, Report 2024/379.
 
 \bibitem{ringvrf}
-J. Burdges, O. Ciobotaru, H. K. Alper, A. Stewart, and S. Vasilyev. Ring verifiable random functions and zero-knowledge continuations. Cryptology ePrint Archive, Report 2023/002, 2023.
+J. Burdges, O. Ciobotaru, H. K\i{}l\i{}n\c{c} Alper, A. Stewart, and S. Vasilyev. Ring verifiable random functions and zero-knowledge continuations. Cryptology ePrint Archive, Report 2023/002, 2023.
 
 \bibitem{popfoundations}
-Foundations of proof of personhood. Cryptology ePrint Archive, Report 2026/333, 2026.
+A. R. Choudhuri, S. Garg, K. Lee, H. Montgomery, G. V. Policharla, and R. Sinha. A cryptographic framework for proof of personhood. Cryptology ePrint Archive, Report 2026/333, 2026.
 
 \bibitem{bbaplus}
 G. Hartung, M. Hoffmann, M. Nagel, and A. Rupp. BBA+: Improving the security and applicability of privacy-preserving point collection. In \emph{ACM CCS}, 2017.
@@ -552,31 +555,31 @@ G. Hartung, M. Hoffmann, M. Nagel, and A. Rupp. BBA+: Improving the security and
 J. Bl\"omer, J. Bobolz, D. Diemert, and F. Eidens. Updatable anonymous credentials and applications to incentive systems. Cryptology ePrint Archive, Report 2019/169, 2019. In \emph{ACM CCS}, 2019.
 
 \bibitem{earlt}
-Efficient anonymous rate-limited tokens with identity revelation. In \emph{ASIACRYPT}, 2025. Cryptology ePrint Archive, Report 2025/1030.
+R. Chairattana-Apirom, N. D\"ottling, A. Lysyanskaya, and S. Tessaro. Everlasting anonymous rate-limited tokens. In \emph{ASIACRYPT}, 2025. Cryptology ePrint Archive, Report 2025/1030.
 
 \bibitem{aqqua}
-AQQUA: Augmenting quisquis with auditability. Cryptology ePrint Archive, Report 2024/1181, 2024.
+G. Papadoulis, D. Balla, P. Grontas, and A. Pagourtzis. AQQUA: Augmenting Quisquis with auditability. In \emph{Applied Cryptography and Network Security (ACNS)}, 2025. Cryptology ePrint Archive, Report 2024/1181.
 
 \bibitem{paxpay}
-Paxpay: Privacy-preserving payments with regulatory compliance. Cryptology ePrint Archive, Report 2025/098, 2025. In \emph{Advances in Financial Technologies (AFT)}, 2025.
+M. Brug\`eres, V. Languille, P. Kuznetsov, and H. Zarfaoui. Fast, private and regulated payments in asynchronous networks. In \emph{Advances in Financial Technologies (AFT)}, 2025. Cryptology ePrint Archive, Report 2025/098.
 
 \bibitem{wdap}
-Watermarkable and disclosure-controlled anonymous payments. Cryptology ePrint Archive, Report 2023/1138, 2023.
+R. Gao. Invisible warning line: Efficient and generic regulation for anonymous cryptocurrencies. Cryptology ePrint Archive, Report 2023/1138, 2023.
 
 \bibitem{dart}
-DART: Distributed auditable anonymous transactions. Cryptology ePrint Archive, Report 2025/239, 2025.
+A. Sarencheh, H. Khoshakhlagh, A. Kavousi, and A. Kiayias. DART: Decentralized, anonymous, and regulation-friendly tokenization. Cryptology ePrint Archive, Report 2025/239, 2025.
 
 \bibitem{survey}
-M. Nardelli et al. A survey on privacy and compliance in digital payment systems. arXiv:2505.21008, 2025.
+M. Nardelli, F. De Sclavis, and M. Iezzi. A hitchhiker's guide to privacy-preserving digital payment systems: A survey on anonymity, confidentiality, and auditability. arXiv:2505.21008, 2025.
 
 \bibitem{sok}
 P. Chatzigiannis, F. Baldimtsi, and K. Chalkias. SoK: Auditability and accountability in distributed payment systems. Cryptology ePrint Archive, Report 2021/239, 2021.
 
 \bibitem{friolo}
-D. Friolo et al. On the (im)possibility of privacy-preserving compliance in payment systems. arXiv:2409.01958, 2024.
+D. Friolo, G. Goodell, D. Toliver, and H. D. Nakib. Private electronic payments with self-custody and zero-knowledge verified reissuance. arXiv:2409.01958, 2024.
 
 \bibitem{poseidon2}
-L. Grassi, D. Khovratovich, and M. Schofnegger. Poseidon2: A faster version of the Poseidon hash function. Cryptology ePrint Archive, Report 2023/323, 2023.
+L. Grassi, D. Khovratovich, and M. Schofnegger. Poseidon2: A faster version of the Poseidon hash function. In \emph{AFRICACRYPT}, 2023. Cryptology ePrint Archive, Report 2023/323.
 
 \bibitem{noir}
 Aztec Labs. \emph{Noir: A domain-specific language for zero-knowledge proofs}, and the Barretenberg proving backend. \url{https://noir-lang.org}.
