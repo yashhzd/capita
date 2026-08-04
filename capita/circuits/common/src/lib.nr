@@ -1,4 +1,4 @@
-// Capita common circuit library.
+// Capita Protocol common circuit library.
 //
 // Mirrors the TypeScript reference implementation in `capita/harness/src/`
 // (constants.ts, poseidon.ts over bb.js poseidon2Hash, merkle.ts,

@@ -1,8 +1,8 @@
-# Capita PoC Implementation Plan
+# Capita Protocol PoC Implementation Plan
 
 > Implement this plan one task at a time. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the Capita PoC — a minimal shielded pool with person-bound tally notes (spec: `docs/spec/2026-08-02-person-bound-limits-design.md`) — plus benchmark results and a seeded paper draft.
+**Goal:** Build the Capita Protocol PoC — a minimal shielded pool with person-bound tally notes (spec: `docs/spec/2026-08-02-person-bound-limits-design.md`) — plus benchmark results and a seeded paper draft.
 
 **Architecture:** Noir circuits (enrollment, spend) over a BN254 shielded pool simulated in a TypeScript harness (Poseidon2 commitments, incremental Merkle tree, nullifier/enrollment sets). Disclosure memos are hash-ElGamal over the embedded Grumpkin curve, computed in-circuit so correctness is enforced by the proof. Credential layer is mocked behind the spec §7.1 interface.
 

@@ -1,4 +1,4 @@
-# Capita: Person-Bound Spending Limits for Shielded Payments Without a Registry
+# Capita Protocol: Person-Bound Spending Limits for Shielded Payments Without a Registry
 
 **Date:** 2026-08-02
 **Status:** Draft for author review

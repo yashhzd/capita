@@ -1,4 +1,4 @@
-# Capita
+# Capita Protocol
 
 **Person-bound spending limits for shielded payments, without a registry.**
 
@@ -21,7 +21,7 @@ So there is a real, written, in-force requirement to enforce limits per human. A
 | Banks, digital euro (SAP) | yes | no | no |
 | Academic private-payment systems with limits (UTT, PRCash, PEReDi, Platypus) | yes | no | no, a registrar holds the user list |
 | Deployed shielded pools (Zcash, Railgun, Privacy Pools, Aztec) | no, limits bind to accounts | yes | yes |
-| **Capita** | **yes** | **yes** | **yes** |
+| **Capita Protocol** | **yes** | **yes** | **yes** |
 
 Every system in the first two rows buys person-binding by having *someone* keep a list of who is enrolled. Every system in the third row stays permissionless by giving up on person-binding, which means limits bind to accounts, and accounts are free to create. Open ten wallets, get ten times the limit.
 
@@ -33,11 +33,11 @@ The naive fix is obvious and wrong. Give each person a persistent identifier, at
 
 So the actual technical problem is: **maintain per-person cumulative state that is unlinkable, even to the party maintaining it, even across the person's own transactions.** The state has to be simultaneously persistent (so the limit means something) and untraceable (so it is not a tag).
 
-## What Capita builds
+## What Capita Protocol builds
 
 Four pieces.
 
-**1. Identity comes from a passport, not from a registrar.** Every ICAO e-passport carries an NFC chip whose data is signed by the issuing government. A zero-knowledge circuit can verify that signature without revealing the passport. This is established work (zk-creds, zkPassport, Anon Aadhaar); Capita consumes it rather than rebuilding it. From the passport data the holder derives
+**1. Identity comes from a passport, not from a registrar.** Every ICAO e-passport carries an NFC chip whose data is signed by the issuing government. A zero-knowledge circuit can verify that signature without revealing the passport. This is established work (zk-creds, zkPassport, Anon Aadhaar); Capita Protocol consumes it rather than rebuilding it. From the passport data the holder derives
 
 ```
 person_secret = H(passport_data)
@@ -46,7 +46,7 @@ person_id     = Poseidon2(person_secret, APP_SCOPE)
 
 `person_id` is scoped to this system, so the identifier here is unlinkable to the identifier the same passport produces in any other application. Nobody else ever learns either value. There is no enrollment server, because there is nothing to enroll *with*: the government already signed the credential, years ago, at a passport office.
 
-**2. The running total is itself a shielded note.** This is the core design decision. Rather than putting per-person state in a side structure (which is what makes it a supercookie), Capita puts it in the *same commitment Merkle tree* as the money. A **tally note** commits to
+**2. The running total is itself a shielded note.** This is the core design decision. Rather than putting per-person state in a side structure (which is what makes it a supercookie), Capita Protocol puts it in the *same commitment Merkle tree* as the money. A **tally note** commits to
 
 ```
 tally_commit = Poseidon2(DOMAIN_TALLY, person_id, subtotal, day, randomness)
@@ -80,7 +80,7 @@ Research code deserves an honest boundary, so this is stated up front and repeat
 
 **Not claimed as novel:**
 
-- **Threshold-triggered disclosure.** Prior art is dense and goes back to at least 2006: CHL e-tokens, GGM16, PRCash, and especially Espresso's CAP, which has enforced `tpk = ⊥ ∨ b_threshold = 1 ∨ memo = Enc_tpk(record)` in-circuit in deployed code since 2022. Capita cites and extends this, moving the trigger from per-transaction to cumulative-per-person.
+- **Threshold-triggered disclosure.** Prior art is dense and goes back to at least 2006: CHL e-tokens, GGM16, PRCash, and especially Espresso's CAP, which has enforced `tpk = ⊥ ∨ b_threshold = 1 ∨ memo = Enc_tpk(record)` in-circuit in deployed code since 2022. Capita Protocol cites and extends this, moving the trigger from per-transaction to cumulative-per-person.
 - **The passport credential layer.** zk-creds (IEEE S&P 2023) and the zkPassport/Self/Anon Aadhaar ecosystem already do this. Consumed, not rebuilt.
 - **Unlinkable value accumulation.** BBA+ and updatable anonymous credentials accumulate values across unlinkable sessions. They are key-bound, not person-bound, so one human can open many.
 

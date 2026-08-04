@@ -1,6 +1,6 @@
 # Paper
 
-`capita.tex` is the working draft of the Capita paper. Target is an ePrint preprint first
+`capita.tex` is the working draft of the Capita Protocol paper. Target is an ePrint preprint first
 (for the priority timestamp), then a venue such as Financial Cryptography or AFT.
 
 ## Building
@@ -58,7 +58,7 @@ Two substantive corrections came out of the same pass and are worth not regressi
   point that makes cross-provider enforcement possible. The paper now says so.
 - Friolo et al. are not making a general argument against persistent payer state. They adopt a
   specific principle, that a payer should not retain secrets from one transaction to the next,
-  and tie it to blackmail and coercion risk. Capita violates that principle directly, and §7
+  and tie it to blackmail and coercion risk. Capita Protocol violates that principle directly, and §7
   now engages it on those terms rather than a softer paraphrase.
 
 ## Before submission

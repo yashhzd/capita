@@ -1,4 +1,4 @@
-# Capita
+# Capita Protocol
 
 Shielded payment pool with person-bound spending limits (zero-knowledge research prototype).
 
