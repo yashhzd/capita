@@ -8,6 +8,8 @@
 \usepackage{booktabs}
 \usepackage{array}
 \usepackage{microtype}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds}
 \usepackage[hidelinks]{hyperref}
 \usepackage{url}
 
@@ -148,6 +150,49 @@ Unlinkable accumulators~\cite{bbaplus,uacs} & key-bound only & yes & yes \\
 \item[Credential layer.] Circuits proving passport validity under published government signing keys, consumed through the interface of Section~\ref{sec:identity}.
 \end{description}
 
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  bx/.style={draw, rounded corners=2pt, align=center, inner sep=4pt},
+  wal/.style={bx, fill=black!4, minimum width=19mm, minimum height=5.5mm},
+  ar/.style={-{Stealth[length=5pt]}, semithick},
+  dsh/.style={-{Stealth[length=5pt]}, semithick, densely dashed, black!55}
+]
+\node[bx, minimum width=23mm, minimum height=11mm] (P) at (0,0)
+  {\textbf{Person}\\[1pt]{\scriptsize ICAO e-passport}};
+
+\node[wal] (w1) at (3.9,1.05) {Wallet $1$};
+\node[wal] (w2) at (3.9,0) {Wallet $2$};
+\node[wal] (w3) at (3.9,-1.05) {Wallet $n$};
+
+\node[bx, minimum width=35mm, fill=blue!5, align=center] (pool) at (8.4,0)
+  {\textbf{Shielded pool}\\[2pt]
+   {\scriptsize commitment Merkle tree}\\
+   {\scriptsize nullifier set}\\
+   {\scriptsize enrollment nullifier set}\\[2pt]
+   {\scriptsize\itshape holds no identity data}};
+
+\node[bx, minimum width=21mm, align=center] (aud) at (12.6,0)
+  {\textbf{Auditor}\\{\scriptsize holds $\mathsf{APK}$}};
+
+\draw[dsh] (P.east) -- (w1.west);
+\draw[dsh] (P.east) -- node[font=\scriptsize, fill=white, inner sep=1pt] {same $\psec$} (w2.west);
+\draw[dsh] (P.east) -- (w3.west);
+
+\draw[ar] (w1.east) -- (pool.west);
+\draw[ar] (w2.east) -- node[font=\scriptsize, fill=white, inner sep=1pt] {spend} (pool.west);
+\draw[ar] (w3.east) -- (pool.west);
+
+\draw[ar] (pool.east) -- node[font=\scriptsize, fill=white, inner sep=1pt] {memos} (aud.west);
+
+\node[font=\scriptsize, align=center, text width=50mm] at (8.4,-1.85)
+  {every wallet advances the \emph{same} tally chain,\\so $n$ wallets do not buy $n$ limits};
+\end{tikzpicture}
+\caption{System model. Identity descends from a government signature the person already holds, so no party enrolls anyone. All of a person's wallets are forced through one tally chain inside the pool, which is what makes the limit person-bound rather than account-bound. The auditor receives a memo from every spend, all of identical shape, and can decrypt them; it learns only the above-threshold records. No entity in this diagram stores a list of participants.}
+\label{fig:model}
+\end{figure}
+
 \subsection{Trust and threat model}
 
 The trust root for identity is the set of government document-signing keys, the same root relied upon at every border crossing. We assume the SNARK is sound and zero-knowledge, the hash function behaves as a random oracle where modelled and is collision-resistant where used for binding, and the encryption scheme is IND-CPA. The pool operator is untrusted for privacy and trusted only for availability. The adversary sees the entire chain: all commitments, all nullifiers, all memos, all proofs, and their timing. The adversary does not hold the auditor's decryption key; an adversary who does is considered separately in Section~\ref{sec:discussion}.
@@ -224,9 +269,83 @@ m = (\mathit{over},\; \mathit{over}\cdot\pid,\; \mathit{over}\cdot s_{\mathrm{ne
 the circuit enforces $(c_1, \mathit{ct}) = \Enc_{\mathsf{APK}}(m; r_{\mathrm{enc}})$ as public output. Below threshold $m$ is the all-zero message; above it, the true record.
 \end{enumerate}
 
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  tn/.style={draw, rounded corners=2pt, align=center, inner sep=3pt,
+             minimum width=27mm, minimum height=9mm, fill=green!7},
+  ob/.style={draw, rounded corners=2pt, align=center, inner sep=3pt,
+             minimum width=27mm, minimum height=9mm, fill=black!7},
+  ar/.style={-{Stealth[length=5pt]}, semithick},
+  lk/.style={densely dotted, black!45}
+]
+\node[tn] (t0) {$C_t^{(0)}$\\[1pt]{\scriptsize $s=0$, day $d$}};
+\node[tn, right=19mm of t0] (t1) {$C_t^{(1)}$\\[1pt]{\scriptsize $s=6{,}000$}};
+\node[tn, right=19mm of t1] (t2) {$C_t^{(2)}$\\[1pt]{\scriptsize $s=15{,}000 > T$}};
+
+\draw[ar] (t0) -- node[above, font=\scriptsize] {spend $6{,}000$}
+                 node[below, font=\scriptsize] {burn $N^{(0)}$} (t1);
+\draw[ar] (t1) -- node[above, font=\scriptsize] {spend $9{,}000$}
+                 node[below, font=\scriptsize] {burn $N^{(1)}$} (t2);
+
+\node[ob, below=17mm of t0] (o0) {{\scriptsize commitment}\\{\scriptsize nullifier, memo}};
+\node[ob, below=17mm of t1] (o1) {{\scriptsize commitment}\\{\scriptsize nullifier, memo}};
+\node[ob, below=17mm of t2] (o2) {{\scriptsize commitment}\\{\scriptsize nullifier, memo}};
+
+\draw[lk] (t0) -- (o0);
+\draw[lk] (t1) -- (o1);
+\draw[lk] (t2) -- (o2);
+
+\node[left=3mm of t0, font=\scriptsize\itshape, align=right, text width=15mm]
+  {holder's view};
+\node[left=3mm of o0, font=\scriptsize\itshape, align=right, text width=15mm]
+  {on-chain view};
+\node[below=3mm of o1, font=\scriptsize, align=center, text width=95mm]
+  {No arrows in the lower row: nothing published links these three events to each other,
+   to the person, or to the wallets that produced them. The third crosses the threshold,
+   and still looks like the others.};
+\end{tikzpicture}
+\caption{One person's tally chain over three transactions. Above, the chain the holder can follow with $\psec$; below, the same three events as everyone else sees them. The subtotal is carried in a commitment, so it is hiding, and each step is authorized by burning a nullifier rather than by naming a predecessor, so consecutive states cannot be joined. This is the pool's existing note machinery applied to a note that holds a running total instead of a balance.}
+\label{fig:chain}
+\end{figure}
+
 \subsection{Why the memo must be uniform}
 
 If only above-threshold spends carried a memo, its presence would announce a crossing, and an observer could identify precisely the transactions the mechanism was designed to keep ordinary. Fixing the memo's shape is therefore not an optimization but a requirement of the privacy argument. Every spend emits a ciphertext of identical size and structure; only the auditor, decrypting all of them, distinguishes reports from dummies. This mirrors institutional practice, in which a bank observes every transaction and files a report on a subset, and it is the point at which our design departs from CAP~\cite{cap}, whose per-transaction trigger does not face the same cumulative-crossing side channel.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  bx/.style={draw, rounded corners=2pt, align=center, inner sep=4pt},
+  msg/.style={bx, minimum width=42mm, minimum height=7mm},
+  op/.style={bx, fill=blue!6, minimum width=30mm, minimum height=9mm},
+  res/.style={bx, fill=black!7, minimum width=32mm, minimum height=9mm},
+  ar/.style={-{Stealth[length=5pt]}, semithick}
+]
+\node[msg, fill=red!6] (real) at (0,1.15)
+  {above threshold: $m=(1,\pid,s_{\mathrm{new}},d_{\mathrm{now}})$};
+\node[msg, fill=green!7] (dum) at (0,-1.15)
+  {below threshold: $m=(0,0,0,0)$};
+
+\node[op] (enc) at (5.5,0) {$\Enc_{\mathsf{APK}}(m;r_{\mathrm{enc}})$\\[1pt]
+  {\scriptsize proven in-circuit}};
+\node[res] (ct) at (10.4,0) {$(c_1,\mathit{ct})$\\[1pt]
+  {\scriptsize identical size and shape}};
+
+\draw[ar] (real.east) -- (enc.north west);
+\draw[ar] (dum.east) -- (enc.south west);
+\draw[ar] (enc) -- (ct);
+
+\node[font=\scriptsize, align=center, text width=100mm] at (5.2,-2.45)
+  {One constraint system runs either way: $8{,}094$ gates, $110$\,ms, a $14{,}656$-byte proof.
+   The branch is selected by witness values, not by circuit structure, so an observer sees
+   no difference in the transaction, its cost, or its size.};
+\end{tikzpicture}
+\caption{The uniform disclosure memo. A threshold trigger that emitted a memo only when it fired would announce every crossing by the memo's mere presence, making the compliance mechanism the leak it was meant to prevent. Both branches therefore encrypt a message of the same shape to the same key, and the circuit enforces correct encryption in both cases, so a prover cannot substitute noise for a report it owes.}
+\label{fig:memo}
+\end{figure}
 
 \subsection{Why the state lives in the pool's tree}
 
