@@ -143,6 +143,8 @@ Unlinkable accumulators~\cite{bbaplus,uacs} & key-bound only & yes & yes \\
 
 \subsection{Entities}
 
+Figure~\ref{fig:model} summarizes the entities and the paths between them.
+
 \begin{description}
 \item[Person.] Holds an ICAO electronic passport whose chip data is signed by the issuing state. Derives all secrets from it. May operate arbitrarily many wallets and accounts.
 \item[Pool.] A permissionless shielded UTXO pool: an append-only commitment Merkle tree, a nullifier set, and an enrollment-nullifier set, maintained by a contract or any consensus layer. Holds no identity data and performs no identity checks.
@@ -269,6 +271,8 @@ m = (\mathit{over},\; \mathit{over}\cdot\pid,\; \mathit{over}\cdot s_{\mathrm{ne
 the circuit enforces $(c_1, \mathit{ct}) = \Enc_{\mathsf{APK}}(m; r_{\mathrm{enc}})$ as public output. Below threshold $m$ is the all-zero message; above it, the true record.
 \end{enumerate}
 
+Figure~\ref{fig:chain} traces the tally chain these rules produce across three consecutive spends, set against what the same three transactions look like to everyone else.
+
 \begin{figure}[t]
 \centering
 \begin{tikzpicture}[
@@ -312,7 +316,7 @@ the circuit enforces $(c_1, \mathit{ct}) = \Enc_{\mathsf{APK}}(m; r_{\mathrm{enc
 
 \subsection{Why the memo must be uniform}
 
-If only above-threshold spends carried a memo, its presence would announce a crossing, and an observer could identify precisely the transactions the mechanism was designed to keep ordinary. Fixing the memo's shape is therefore not an optimization but a requirement of the privacy argument. Every spend emits a ciphertext of identical size and structure; only the auditor, decrypting all of them, distinguishes reports from dummies. This mirrors institutional practice, in which a bank observes every transaction and files a report on a subset, and it is the point at which our design departs from CAP~\cite{cap}, whose per-transaction trigger does not face the same cumulative-crossing side channel.
+If only above-threshold spends carried a memo, its presence would announce a crossing, and an observer could identify precisely the transactions the mechanism was designed to keep ordinary. Fixing the memo's shape is therefore not an optimization but a requirement of the privacy argument. Every spend emits a ciphertext of identical size and structure, as shown in Figure~\ref{fig:memo}; only the auditor, decrypting all of them, distinguishes reports from dummies. This mirrors institutional practice, in which a bank observes every transaction and files a report on a subset, and it is the point at which our design departs from CAP~\cite{cap}, whose per-transaction trigger does not face the same cumulative-crossing side channel.
 
 \begin{figure}[t]
 \centering
