@@ -42,8 +42,12 @@ Reported figures were taken on an Apple M4 Max (14 cores, 36 GB) under macOS 26.
 
 ## Citations
 
-All 28 references were checked against primary sources (IACR ePrint, arXiv, publisher pages,
-EUR-Lex, eCFR) on 2026-08-05. Titles, author lists, and venues match the record.
+All 30 references were checked against primary sources (IACR ePrint, arXiv, publisher pages,
+EUR-Lex, eCFR). The first 28 were verified on 2026-08-05; PayOff and ul-PCS were added and
+verified on 2026-08-06. Titles, author lists, and venues match the record.
+
+ul-PCS is cited as an ePrint report with no venue, because the ePrint page lists none. Do not
+add one without checking the archive first.
 
 This mattered: the first draft was assembled from terse research notes that recorded ePrint
 numbers and one-line descriptions but not full citations, and seven titles had been inferred
@@ -69,9 +73,16 @@ Two substantive corrections came out of the same pass and are worth not regressi
 - **Proofs are sketches.** Section 5 gives game-based definitions with proof sketches. Adequate
   for a preprint; a top-tier venue will likely want full proofs, and the UC treatment is
   named as future work.
-- **Fresh prior-art sweep.** The survey behind Section 2 predates the current ePrint/arXiv
-  cycle. Re-sweep for competing work before submitting, particularly anything pairing
-  personhood with payment limits.
+- **~~Fresh prior-art sweep.~~ Done 2026-08-06.** Second independent sweep, four days after the
+  first, searching ePrint and arXiv directly rather than through result snippets and pulling
+  full abstracts on every close candidate. Nothing was found combining personhood, cumulative
+  amount thresholds, cross-account aggregation, unlinkable per-person state, and registrar-free
+  operation. Two near misses were found and are now cited in Section 2: PayOff enforces an
+  amount limit as an in-circuit inequality but scopes it to one wallet's secure element, and
+  ul-PCS scopes its policies to single participants by construction. Also checked and ruled
+  out: World AgentKit (per-human, but a request count, not an amount), RLN (stake-weighted
+  counts, no personhood), Privacy Pools (source-of-funds legitimacy, not thresholds).
+  Re-sweep once more immediately before submission to catch anything posted in the interim.
 - **Optional:** Table 1 positions the work qualitatively. A quantitative comparison against
   PRCash, UTT, Platypus and PEReDi would strengthen the evaluation, but requires sourcing
   their reported numbers carefully rather than estimating.

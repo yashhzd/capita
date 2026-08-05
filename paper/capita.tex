@@ -113,6 +113,8 @@ Accumulating a value across unlinkable sessions is also well studied. BBA+~\cite
 
 Threshold-triggered disclosure in a payment system is old and, importantly, deployed. Camenisch, Hohenberger and Lysyanskaya~\cite{chl2006} give e-cash in which anonymity holds only while the user stays below a publicly known spending limit \emph{with any single merchant}, which makes it the closest prior work on limits over amounts rather than counts; the limit is nonetheless per merchant rather than per person, and coins are withdrawn from a bank that knows who withdrew them; Garman, Green and Miers~\cite{ggm16} add accountable privacy to decentralized anonymous payments; PRCash~\cite{prcash} enforces regulator-visible limits on transaction value. Espresso's Configurable Asset Privacy (CAP)~\cite{cap} enforces in-circuit the disjunction that a viewing key is absent, or a threshold bit is set, or the memo is a correct encryption of the transaction record; it has been deployed since 2022. We do not claim novelty for threshold-triggered disclosure. Capita Protocol cites and extends this line by moving the trigger from a per-transaction predicate to a cumulative per-person one, and by requiring memo uniformity, which a per-transaction trigger does not need in the same way.
 
+Closest to our enforcement mechanism is PayOff~\cite{payoff}, a regulated central bank digital currency supporting private offline payments, which checks a holding limit as an in-circuit inequality on the recipient's balance, $\mathsf{bal} + v \le H$. This is the same shape as the comparison our spend circuit performs, and it establishes that amount-based limits are enforceable inside a proof rather than only at a registrar. The limit is nonetheless bound to a single wallet's secure element, and the system has no mechanism by which a second wallet could be recognized as belonging to the same holder, so a user who enrolls twice obtains $2H$. PayOff shares several authors with PRCash and Platypus, so per-wallet scoping here reflects the settled convention of a group that has repeatedly treated regulated privacy, rather than an oversight. Unlinkable policy-compliant signatures~\cite{ulpcs} widen the class of policies a payment can be required to satisfy while keeping sender and recipient unlinkable, but the achievable predicates are scoped to spending or transaction limits and assertions about \emph{single participants}. Both works land on the account side of the distinction this paper draws: they constrain what one account may do, not what one person may do across every account they control.
+
 The registrar family is broad: in addition to those already named, AQQUA~\cite{aqqua} supports audits over a private ledger, Paxpay~\cite{paxpay} supports regulated transfer limits and address restrictions in an asynchronous, consensus-free setting, and further designs address auditability with a designated authority~\cite{wdap,dart}. Every one of them obtains person-binding from a registration step. Surveys of the area~\cite{survey,sok} catalogue ``anonymity budget'' and ``operating limit'' mechanisms but treat multi-account evasion and personhood only in passing, which we read as confirmation that the design point is unoccupied rather than as evidence it is uninteresting.
 
 Finally, Friolo et al.~\cite{friolo} adopt as an explicit design principle that a payer should not be required to retain secrets arising from one transaction until the next, arguing that this property is essential both to reasoning about the security of asset storage and to the risk of blackmail or coercion used to extract payment history. Capita Protocol retains exactly such state, so the principle is in direct tension with our design rather than adjacent to it. We engage it in Section~\ref{sec:discussion}.
@@ -132,6 +134,7 @@ Table~\ref{tab:gap} summarizes. To our knowledge, no prior system provides per-p
 Banking / digital euro (SAP) & yes & no & no \\
 Registrar-based systems~\cite{utt,prcash,peredi,platypus} & yes & no & no \\
 Deployed shielded pools~\cite{zcash} & account-bound only & yes & yes \\
+Account-scoped amount limits~\cite{payoff,ulpcs} & account-bound only & no & no \\
 Personhood systems~\cite{zkcreds,syra,ringvrf} & counts only & yes & yes \\
 Unlinkable accumulators~\cite{bbaplus,uacs} & key-bound only & yes & yes \\
 \textbf{Capita Protocol (this work)} & \textbf{yes} & \textbf{yes} & \textbf{yes} \\
@@ -415,7 +418,7 @@ Immediate from Lemma~\ref{lem:threshold} together with in-circuit enforcement of
 
 \subsection{Implementation}
 
-We implement Capita Protocol in Noir with the Barretenberg proving backend (UltraHonk), comprising a shared circuit library, an enrollment circuit, and a spend circuit, alongside an independent TypeScript reference implementation of the same protocol. The two implementations are not client and server; they are two implementations of one specification, cross-checked by a consistency circuit and test suite, so that a mistake in either surfaces as disagreement rather than as silence. The prototype comprises approximately 1{,}200 lines of Noir and 780 lines of TypeScript, with 1{,}460 lines of tests: 79 tests in total, of which 36 are circuit tests and 43 are harness and integration tests.
+We implement Capita Protocol in Noir with the Barretenberg proving backend (UltraHonk)~\cite{noir}, comprising a shared circuit library, an enrollment circuit, and a spend circuit, alongside an independent TypeScript reference implementation of the same protocol. The two implementations are not client and server; they are two implementations of one specification, cross-checked by a consistency circuit and test suite, so that a mistake in either surfaces as disagreement rather than as silence. The prototype comprises approximately 1{,}200 lines of Noir and 780 lines of TypeScript, with 1{,}460 lines of tests: 79 tests in total, of which 36 are circuit tests and 43 are harness and integration tests.
 
 Soundness constraints are held to an explicit bar: every constraint that prevents an attack is pinned by a test that fails when the constraint is deleted. This bar has a blind spot that is worth reporting because it is a property of the toolchain rather than of our code. Noir elides range checks whose witness feeds a black-box operation; two \texttt{assert\_max\_bit\_size} calls in our encryption gadget emitted no constraints at all while appearing correct in source, and deleting them changed nothing observable, because there was nothing to delete. A delete-and-observe methodology cannot detect an absent constraint. We addressed this by inspecting the compiled ACIR directly and asserting that every scalar witness feeding the multi-scalar multiplication carries its own range opcode.
 
@@ -535,6 +538,12 @@ A. Tomescu, A. Bhat, B. Applebaum, I. Abraham, G. Gueta, B. Pinkas, and A. Yanai
 
 \bibitem{cap}
 Espresso Systems. \emph{Configurable Asset Privacy (CAP)}. \url{https://github.com/EspressoSystems/cap}, 2022.
+
+\bibitem{payoff}
+C. Beer, S. Zingg, K. Kostiainen, K. W\"ust, V. Capkun, and S. Capkun. PayOff: A regulated central bank digital currency with private offline payments. arXiv:2408.06956, 2024.
+
+\bibitem{ulpcs}
+C. Badertscher, M. Sedaghat, and H. Waldner. Unlinkable policy-compliant signatures for compliant and decentralized anonymous payments. Cryptology ePrint Archive, Report 2023/1070, 2023.
 
 \bibitem{zkcreds}
 M. Rosenberg, J. White, C. Garman, and I. Miers. zk-creds: Flexible anonymous credentials from zkSNARKs and existing identity infrastructure. In \emph{IEEE Symposium on Security and Privacy}, 2023. Cryptology ePrint Archive, Report 2022/878.
