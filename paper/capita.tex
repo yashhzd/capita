@@ -64,7 +64,7 @@ Financial regulation in both the United States and the European Union requires t
 
 We present Capita Protocol, a construction that occupies the empty cell: cumulative per-person spending limits in a permissionless shielded pool, with no registrar, no central identity database, and no persistent linkable identifier. Three ideas combine. First, identity is derived from a government-signed electronic passport rather than issued by an operator, so the sybil bound requires no enrollment authority. Second, and centrally, the per-person running subtotal is stored as a \emph{tally note} in the same commitment Merkle tree as monetary notes, spent and recreated by the same nullifier machinery; the per-person state therefore inherits the pool's unlinkability instead of becoming a tracking tag. Third, every spend carries an identically shaped ciphertext to an auditor: a genuine disclosure record above the threshold, and a fixed dummy below it. The compliance mechanism therefore does not itself signal which transactions crossed the limit.
 
-We give game-based definitions for person-binding, limit soundness, unlinkability, and disclosure correctness, together with proof sketches, and report a working implementation in Noir over BN254 with a Grumpkin-embedded encryption gadget. The spend circuit is 8{,}094 UltraHonk gates and proves in 110\,ms with 2.7\,ms verification on commodity hardware. Proving cost below and above the disclosure threshold is measured at 110.1\,ms and 110.2\,ms respectively, so the uniformity on which the privacy argument depends is observable rather than assumed. We are explicit about what is not solved, including multiple citizenship, consenting proxies, and the mocked credential layer of the present prototype.
+We specify the credential layer end to end, from optical capture of the machine-readable zone and PACE chip access through in-circuit verification of the ICAO Passive Authentication chain to derivation of the person secret, and we identify a leak that a naive deployment of that chain introduces: because signature algorithms correlate with issuing states, selecting a verification circuit by algorithm publishes an approximation of the holder's nationality. We close it by witnessing the verification key under a membership proof, so enrollment presents one interface for every holder. We give game-based definitions for person-binding, limit soundness, unlinkability, and disclosure correctness, together with proof sketches, and report a working implementation in Noir over BN254 with a Grumpkin-embedded encryption gadget. The spend circuit is 8{,}094 UltraHonk gates and proves in 110\,ms with 2.7\,ms verification on commodity hardware. Proving cost below and above the disclosure threshold is measured at 110.1\,ms and 110.2\,ms respectively, so the uniformity on which the privacy argument depends is observable rather than assumed; costs for the passport circuits are projected from published figures for deployed systems on the same proving stack and are labelled as such throughout. We are explicit about what is not solved, including multiple citizenship, replacement documents, borrowed documents, and populations without passports at all.
 \end{abstract}
 
 \noindent\textbf{Keywords:} zero-knowledge proofs $\cdot$ shielded payments $\cdot$ proof of personhood $\cdot$ regulatory compliance $\cdot$ spending limits $\cdot$ auditability $\cdot$ central bank digital currency
@@ -93,7 +93,8 @@ Capita Protocol resolves this by refusing to give the per-person state a home of
 \item We give a construction, \emph{pool-native shielded tally notes}, in which per-person cumulative state is carried in the payment pool's own commitment tree, and we show why the two natural alternatives (attester-managed state trees and issuer-updatable credentials) reintroduce the trusted party we set out to remove (Section~\ref{sec:construction}).
 \item We introduce \emph{uniform disclosure memos}: every transaction carries an identically shaped ciphertext regardless of threshold position, closing a side channel that threshold-triggered disclosure otherwise opens. We verify uniformity empirically as well as structurally (Sections~\ref{sec:construction} and~\ref{sec:eval}).
 \item We give game-based definitions and proof sketches for person-binding, limit soundness, unlinkability, and disclosure correctness, including an explicit and non-obvious precondition on the threshold comparison gadget (Section~\ref{sec:security}).
-\item We implement the construction in Noir over BN254 and report measured circuit sizes, proving times, verification times, and proof sizes for enrollment and spend, at both threshold positions (Section~\ref{sec:eval}).
+\item We specify the credential layer in full rather than as an interface, covering chip access, the Passive Authentication chain, circuit decomposition and recursion, and the choice of what to bind the identity to; and we identify and close a nationality leak arising from signature-algorithm diversity that individually zero-knowledge circuits do not prevent (Section~\ref{sec:identity}).
+\item We implement the construction in Noir over BN254 and report measured circuit sizes, proving times, verification times, and proof sizes for enrollment and spend, at both threshold positions, separating these from projected passport-circuit costs (Section~\ref{sec:eval}).
 \end{enumerate}
 
 \section{Related Work}
@@ -155,7 +156,7 @@ Figure~\ref{fig:model} summarizes the entities and the paths between them.
 \item[Person.] Holds an ICAO electronic passport whose chip data is signed by the issuing state. Derives all secrets from it. May operate arbitrarily many wallets and accounts.
 \item[Pool.] A permissionless shielded UTXO pool: an append-only commitment Merkle tree, a nullifier set, and an enrollment-nullifier set, maintained by a contract or any consensus layer. Holds no identity data and performs no identity checks.
 \item[Auditor.] Holds a decryption key for disclosure memos. Honest-but-curious. Learns only disclosure records, which are pseudonymous. We treat a single key; threshold distribution across a committee is standard~\cite{dart,utt} and orthogonal.
-\item[Credential layer.] Circuits proving passport validity under published government signing keys, consumed through the interface of Section~\ref{sec:identity}.
+\item[Credential layer.] Circuits proving, in zero knowledge, that the holder possesses an ICAO electronic passport whose Passive Authentication chain terminates in a Country Signing Certification Authority key present in a public registry root. Specified in full in Section~\ref{sec:identity}. It writes nothing and stores nothing; the registry it reads enumerates issuing states, not people.
 \end{description}
 
 \begin{figure}[t]
@@ -203,7 +204,7 @@ Figure~\ref{fig:model} summarizes the entities and the paths between them.
 
 \subsection{Trust and threat model}
 
-The trust root for identity is the set of government document-signing keys, the same root relied upon at every border crossing. We assume the SNARK is sound and zero-knowledge, the hash function behaves as a random oracle where modelled and is collision-resistant where used for binding, and the encryption scheme is IND-CPA. The pool operator is untrusted for privacy and trusted only for availability. The adversary sees the entire chain: all commitments, all nullifiers, all memos, all proofs, and their timing. The adversary does not hold the auditor's decryption key; an adversary who does is considered separately in Section~\ref{sec:discussion}.
+The trust root for identity is the set of government document-signing keys, the same root relied upon at every border crossing. We assume the SNARK is sound and zero-knowledge, the hash function behaves as a random oracle where modelled and is collision-resistant where used for binding, and the encryption scheme is IND-CPA. Three assumptions are specific to the credential layer and we separate them out because they are the ones a deployment can fail independently of the cryptography. \emph{Registry correctness}: the CSCA registry root of Section~\ref{sec:cscaroot} contains exactly the genuine issuing-state keys, so an adversary cannot introduce one of their own. \emph{Non-cloning}: an adversary cannot extract a chip's Active Authentication private key from tamper-resistant hardware, which bounds document duplication for issuers supporting that protocol and is simply assumed for those that do not (Section~\ref{sec:cloning}). \emph{Sole possession}: the holder presenting a document is its rightful bearer. The third is the weakest of the three, since ICAO's access control authenticates the booklet rather than the bearer, and Section~\ref{sec:discussion} treats what follows from its failure. The pool operator is untrusted for privacy and trusted only for availability. The adversary sees the entire chain: all commitments, all nullifiers, all memos, all proofs, and their timing. The adversary does not hold the auditor's decryption key; an adversary who does is considered separately in Section~\ref{sec:discussion}.
 
 \subsection{Security definitions}
 
@@ -230,19 +231,125 @@ For every accepted spend resulting in subtotal $s_{\mathrm{new}} > T$, the accom
 
 \subsection{Primitives and notation}
 
-We work over the BN254 scalar field $\mathbb{F}_p$. $\PT$ denotes Poseidon2~\cite{poseidon2}, with arity part of the domain, so $\PT$ applied to inputs of different lengths are distinct functions. Disclosure memos use hash-ElGamal over the Grumpkin curve, whose base field is the BN254 scalar field, making curve arithmetic native inside the circuit. Domain separation tags $\mathsf{DOM}_{\mathrm{pay}}, \mathsf{DOM}_{\mathrm{tal}}, \mathsf{DOM}_{\mathrm{enr}}, \mathsf{DOM}_{\mathrm{nul}}$ are distinct constants.
+We work over the BN254 scalar field $\mathbb{F}_p$. $\PT$ denotes Poseidon2~\cite{poseidon2}, with arity part of the domain, so $\PT$ applied to inputs of different lengths are distinct functions. Disclosure memos use hash-ElGamal over the Grumpkin curve, whose base field is the BN254 scalar field, making curve arithmetic native inside the circuit. Domain separation tags $\mathsf{DOM}_{\mathrm{pay}}, \mathsf{DOM}_{\mathrm{tal}}, \mathsf{DOM}_{\mathrm{enr}}, \mathsf{DOM}_{\mathrm{nul}}, \mathsf{DOM}_{\mathrm{pass}}, \mathsf{DOM}_{\mathrm{dsc}}, \mathsf{DOM}_{\mathrm{dg1}}$ are distinct constants. Digest functions internal to the passport chain, written $\mathrm{SHA}$ below, are those the issuing state selected and are not interchangeable with $\PT$; the credential layer must verify the state's choice rather than substitute a proof-friendly alternative.
 
-\subsection{Identity derivation}
+\subsection{The credential layer}
 \label{sec:identity}
 
-The holder computes
+Sybil resistance in Capita Protocol rests entirely on a signature the holder's government has already produced and placed on their passport chip. Because that signature is the trust root for the whole construction, we specify the path from the physical document to the field element $\psec$ in full. Nothing in this subsection is novel cryptography; the contribution is the choice of what to bind to and the observation, in Section~\ref{sec:variant}, that naive deployment of an otherwise standard verification chain leaks the holder's nationality.
+
+\subsubsection{The document and its signature chain}
+\label{sec:icao}
+
+ICAO Doc~9303~\cite{icao9303} specifies the Logical Data Structure carried by the contactless chip in an electronic passport. The chip exposes numbered data groups, of which two matter here: DG1 holds the machine-readable zone (MRZ) exactly as printed on the data page, and DG15 holds an Active Authentication public key where the issuer supports that option. Alongside them sits the Document Security Object (SOD), which is what makes the document self-authenticating.
+
+The SOD is a CMS \texttt{SignedData} structure~\cite{rfc5652}. Its encapsulated content is an ASN.1 \texttt{LDSSecurityObject} listing, for every data group present, the digest of that group under a stated hash algorithm. The signed attributes include a \texttt{messageDigest} attribute holding the digest of that encapsulated content, and the signature is computed over the DER encoding of those signed attributes using the private key of a Document Signer. The corresponding Document Signer Certificate (DSC) is carried inside the SOD, and the DSC is itself signed by the issuing state's Country Signing Certification Authority (CSCA).
+
+Passive Authentication is the verification of that chain, and it is a chain of four links:
 \[
-\psec = H(\text{passport data}), \qquad
+\mathrm{DG1}
+\;\xrightarrow{\ \text{digest}\ }\;
+\texttt{LDSSecurityObject}
+\;\xrightarrow{\ \text{digest}\ }\;
+\texttt{signedAttrs}
+\;\xrightarrow{\ \sigma_{\mathrm{DS}}\ }\;
+\mathrm{DSC}
+\;\xrightarrow{\ \sigma_{\mathrm{CSCA}}\ }\;
+\mathsf{pk}_{\mathrm{CSCA}}.
+\]
+Verifying every link establishes that the issuing state attests to the exact MRZ bytes in DG1. Figure~\ref{fig:passport} shows the chain together with the circuit boundaries we impose on it.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  bx/.style={draw, rounded corners=2pt, align=center, inner sep=3.5pt, minimum height=7mm},
+  ar/.style={-{Stealth[length=5pt]}, semithick},
+  grp/.style={draw, densely dashed, rounded corners=3pt, inner sep=7pt}
+]
+\node[bx, fill=black!4] (dg1) at (0,0) {DG1\\{\scriptsize MRZ bytes}};
+\node[bx] (lds) at (3.15,0) {\texttt{LDS}\\{\scriptsize \texttt{SecurityObject}}};
+\node[bx] (sa) at (6.3,0) {\texttt{signedAttrs}\\{\scriptsize \texttt{messageDigest}}};
+\node[bx] (dsc) at (9.35,0) {DSC\\{\scriptsize $\mathsf{pk}_{\mathrm{DS}}$}};
+\node[bx, fill=blue!5] (csca) at (12.3,0) {$R_{\mathrm{csca}}$\\{\scriptsize registry root}};
+
+\draw[ar] (dg1) -- node[font=\scriptsize, fill=white, inner sep=1.5pt] {$\mathrm{SHA}$} (lds);
+\draw[ar] (lds) -- node[font=\scriptsize, fill=white, inner sep=1.5pt] {$\mathrm{SHA}$} (sa);
+\draw[ar] (sa) -- node[font=\scriptsize, fill=white, inner sep=1.5pt] {$\sigma_{\mathrm{DS}}$} (dsc);
+\draw[ar] (dsc) -- node[font=\scriptsize, fill=white, inner sep=1.5pt] {$\sigma_{\mathrm{CSCA}}$} (csca);
+
+\node[bx, fill=black!4] (psec) at (0,-2.15) {$\psec \to \pid$};
+\draw[ar] (dg1) -- node[right, font=\scriptsize, xshift=1pt] {$\PT$} (psec);
+
+\begin{scope}[on background layer]
+\node[grp, fit=(dg1)(lds)(sa), label={[font=\scriptsize\itshape]below:$\mathcal{C}_{\mathrm{sod}}$}] {};
+\node[grp, fit=(dsc)(csca), label={[font=\scriptsize\itshape]below:$\mathcal{C}_{\mathrm{csca}}$}] {};
+\node[grp, fit=(psec), label={[font=\scriptsize\itshape]below:$\mathcal{C}_{\mathrm{der}}$}] {};
+\end{scope}
+\end{tikzpicture}
+\caption{Passive Authentication as the credential layer proves it. Reading left to right is the ICAO chain: the digest of the MRZ appears in the security object, whose digest appears in the signed attributes, which the Document Signer signs, under a certificate the issuing state's CSCA signs. Only the rightmost box is public; every other value is a private witness. The three dashed regions are the circuits of Section~\ref{sec:credcircuit}, composed recursively so that enrollment presents a single proof with one verification key for every holder, whatever their document's algorithm.}
+\label{fig:passport}
+\end{figure}
+
+\subsubsection{Reading the chip}
+\label{sec:chipread}
+
+Chip access is deliberately gated on physical possession of the booklet. The holder first captures the MRZ optically from the data page. For the TD3 format used by passports this is two lines of forty-four characters, from which the access key is derived over the concatenation of document number, date of birth, and expiry date, each with its check digit.
+
+Two access protocols are in use. Basic Access Control derives a seed from the SHA-1 digest of that concatenation and establishes a Triple-DES secure messaging channel. Password Authenticated Connection Establishment (PACE) instead runs a password-authenticated Diffie--Hellman exchange keyed on the same MRZ material, and is mandatory for documents issued under the current specification; it removes the offline dictionary attack that Basic Access Control admits against a recorded session. Either way the reader obtains a secure messaging channel over which it selects the passport application and reads DG1, DG15 where present, and the SOD.
+
+Two consequences follow, and both are properties of ICAO's design rather than of ours. First, an adversary who has never physically held the booklet cannot read the chip, because the access key is printed inside it. Second, and less comfortably, an adversary who \emph{has} held it can, since the protocol authenticates the document rather than its bearer. We return to this in Section~\ref{sec:discussion}.
+
+\subsubsection{What the circuit proves}
+\label{sec:credcircuit}
+
+A single monolithic circuit over the whole chain would be both large and inflexible, because the two signature verifications use whatever algorithm the issuing state chose. We therefore split the statement into three circuits and compose them recursively.
+
+\begin{description}
+\item[$\mathcal{C}_{\mathrm{csca}}$ (trust anchor).] Proves that the embedded DSC carries a valid signature under some $\mathsf{pk}_{\mathrm{CSCA}}$ that is a member of the CSCA registry root $R_{\mathrm{csca}}$ of Section~\ref{sec:cscaroot}. It outputs the binding commitment $h_{\mathrm{dsc}} = \PT(\mathsf{DOM}_{\mathrm{dsc}}, \mathsf{pk}_{\mathrm{DS}})$ and reveals neither certificate.
+\item[$\mathcal{C}_{\mathrm{sod}}$ (document integrity).] Takes $h_{\mathrm{dsc}}$ as a public input, and proves that $\sigma_{\mathrm{DS}}$ verifies over \texttt{signedAttrs} under the committed $\mathsf{pk}_{\mathrm{DS}}$, that the \texttt{messageDigest} attribute equals the digest of the encapsulated \texttt{LDSSecurityObject}, and that the digest of the witnessed DG1 bytes equals the DG1 entry within it. It outputs $h_{\mathrm{dg1}} = \PT(\mathsf{DOM}_{\mathrm{dg1}}, \mathrm{DG1})$.
+\item[$\mathcal{C}_{\mathrm{der}}$ (derivation).] Takes $h_{\mathrm{dg1}}$, reproduces the field parse of Section~\ref{sec:derive} from the same witnessed DG1 bytes, and derives $\psec$ and then $\pid$. This circuit is where our protocol begins, and it is the only one of the three that is independent of the issuing state's algorithm choices.
+\end{description}
+
+The split earns three things. The trust-anchor proof depends only on the DSC, which is fixed for the life of the document, so it is generated once and cached rather than recomputed per transaction. Only the first two circuits need per-algorithm variants, leaving the protocol-specific logic untouched as the variant set grows. And because $\mathcal{C}_{\mathrm{der}}$ consumes a commitment rather than raw certificate material, the enrollment circuit of Section~\ref{sec:enroll} aggregates the chain into one proof whose public interface is a single field element.
+
+\subsubsection{Deriving the person secret}
+\label{sec:derive}
+
+The MRZ carries both document attributes and personal attributes, and the choice between them is the one genuine design decision in this subsection. We bind to the document:
+\[
+\psec = \PT(\mathsf{DOM}_{\mathrm{pass}},\; \mathit{state},\; \mathit{docnum}), \qquad
 \pid = \PT(\psec, \mathsf{APP\_SCOPE}),
 \]
-where the passport data comprises the machine-readable zone, chip data groups, and signature material, and $\mathsf{APP\_SCOPE}$ is a fixed constant for this deployment. Scoping means the identifier here is unlinkable to the identifier the same passport yields in any other application. Neither value is ever revealed to any party. Version~1 binds to the \emph{document}; renewal yields a new slot, rate-limited by the issuing state's own processes. Binding instead to personal data (name, date of birth, nationality) would survive renewal at the cost of real collision risk, and we do not adopt it.
+where $\mathit{state}$ is the three-character issuing-state code and $\mathit{docnum}$ the nine-character document number, each packed into a single field element as big-endian ASCII; twenty-four and seventy-two bits respectively sit far below the $254$-bit capacity of $\mathbb{F}_p$, so the packing is injective without further encoding. Namespacing the document number by issuing state is what makes the pair globally unique, since document numbers are only unique within an issuer. Scoping by $\mathsf{APP\_SCOPE}$ means the identifier this deployment sees is unlinkable to the identifier the same passport yields anywhere else. Neither value is revealed to any party at any point.
+
+Binding to the document rather than to the person is a trade, and it is worth stating both sides. Personal attributes, meaning name, date of birth, sex and nationality, survive renewal, but they collide: two people sharing a name, a birth date, a sex and a nationality would share a $\psec$, and in populous states that is not a hypothetical. A collision is strictly worse than a duplicate, because the two holders would silently share and corrupt one tally chain. Document binding admits the converse failure instead: renewal produces a new document number, hence a new $\pid$, hence a fresh limit. We accept that failure because it is rate-limited by the issuing state rather than by us, it costs a genuine passport application, and it leaves an administrative trail, whereas a collision is silent and unfixable. Section~\ref{sec:discussion} treats the replacement-by-loss-report variant of the attack, which is faster than waiting for expiry.
+
+\subsubsection{The CSCA registry and its trust assumption}
+\label{sec:cscaroot}
+
+$\mathcal{C}_{\mathrm{csca}}$ checks membership in a Merkle root over the set of trusted CSCA public keys. Those keys are published through the ICAO Public Key Directory and through the signed CSCA master lists that participating states issue, so the set is a public artifact and the root over it is reproducible by anyone from the same inputs. States rotate CSCA keys on a multi-year cycle with deliberately overlapping validity, so the registry is append-mostly and a rotation does not invalidate documents already in circulation.
+
+This is a trust assumption and we name it as such: a registry root that admits an adversarial key admits forged identities wholesale. What it is not, however, is a registrar, and the distinction is the one the paper turns on. The registry enumerates \emph{issuing states}, of which there are on the order of two hundred. It contains no entry per person, it grows only when a state rotates a key, and no act of enrollment writes to it. An adversary who compromises it gains the ability to mint identities but learns nothing whatsoever about any existing holder, because there is nothing about holders in it to learn. A registrar database inverts both properties.
+
+\subsubsection{Cloning, and what Passive Authentication does not prove}
+\label{sec:cloning}
+
+Passive Authentication proves that the data is genuinely signed. It does not prove that the chip presenting the data is the chip the signature was issued for, because a byte-for-byte copy of DG1 and the SOD verifies exactly as the original does. ICAO addresses this with two optional protocols. Active Authentication has the chip sign a reader-supplied challenge under a private key whose public counterpart sits in DG15, and Chip Authentication performs an ephemeral-static Diffie--Hellman against a key in DG14; either demonstrates that the chip holds a private key that a passive copy of the data groups does not carry.
+
+Where the issuer supports Active Authentication, our enrollment circuit takes the challenge response as an additional conjunct, proving in zero knowledge that a valid response exists under the DG15 key that the SOD attests. This raises the bar from copying published bytes to extracting a key from tamper-resistant hardware. It does not eliminate the attack, and support is not universal, so we state non-cloning as an explicit assumption in Section~\ref{sec:security} rather than a derived property.
+
+\subsubsection{Algorithm diversity, and a leak it creates}
+\label{sec:variant}
+
+Issuing states do not agree on signature algorithms. Documents in circulation use RSA under PKCS\#1~v1.5 and under PSS at 2048, 3072 and 4096 bits, and ECDSA over the NIST P-256 and P-384 curves and over several Brainpool curves, paired with digests from SHA-1 through SHA-512. A deployment therefore carries a family of variants of $\mathcal{C}_{\mathrm{csca}}$ and $\mathcal{C}_{\mathrm{sod}}$, one per algorithm pairing it supports.
+
+The obvious deployment of that family leaks. If the variant is selected by verification key at verification time, the key identifies the algorithm, the algorithm correlates strongly with the issuing state, and every enrollment therefore publishes an approximation of its holder's nationality. For a system whose entire purpose is to avoid attaching durable attributes to payments, shipping that would be self-defeating, and it is not obvious from the construction: each variant is individually zero-knowledge, and the leak lives in the choice among them rather than in any one of them.
+
+We close it with the same mechanism the construction already uses elsewhere. The enrollment circuit verifies an inner proof under a verification key supplied as a private witness, together with a Merkle proof that the key belongs to the published set of admitted variants. The outer proof then has one verification key for every holder regardless of document origin, and the observable interface of enrollment is identical for all of them. This is the credential-layer analogue of the uniform disclosure memos of Section~\ref{sec:uniform}: in both cases a mechanism that is sound but shape-revealing is made uniform, because in this setting shape is itself the leak.
 
 \subsection{Notes}
+\label{sec:notes}
 
 Two note types share one commitment tree:
 \begin{align*}
@@ -252,8 +359,17 @@ Two note types share one commitment tree:
 Nullifiers are $\Nul(\mathit{secret}, C) = \PT(\mathsf{DOM}_{\mathrm{nul}}, \mathit{secret}, C)$, where $\mathit{secret}$ is $\mathsf{sk}$ for a payment note and $\psec$ for a tally note. Distinct domain tags are load-bearing: without them a payment note could be reinterpreted as a tally note of different arity, collapsing the two accounting systems into one.
 
 \subsection{Enrollment}
+\label{sec:enroll}
 
-Enrollment happens once per person. The circuit proves possession of a valid passport credential through the interface of Section~\ref{sec:identity}, correct derivation of $\pid$, and outputs an enrollment nullifier $E = \PT(\mathsf{DOM}_{\mathrm{enr}}, \pid)$ together with a genesis tally commitment $\Tcom(\pid, 0, d_{\mathrm{now}}, r)$. The pool rejects a duplicate $E$. The public trace is one opaque field element and one commitment. The metadata leak is the fact and timing of a single enrollment event per person, which batching and delay mitigate but do not eliminate.
+Enrollment happens once per person and is the only point at which the credential layer is exercised. The circuit takes the recursive proof of Section~\ref{sec:credcircuit} as a witness and proves, in one statement:
+
+\begin{enumerate}
+\item \textbf{Credential validity.} The inner proof verifies under a verification key $\mathsf{vk}$ supplied as a private witness, together with a Merkle proof that $\mathsf{vk}$ is a member of the published root $R_{\mathrm{vk}}$ of admitted algorithm variants. Per Section~\ref{sec:variant}, witnessing rather than publishing $\mathsf{vk}$ is what keeps enrollment from advertising the holder's issuing state.
+\item \textbf{Anti-cloning, where available.} If the document carries a DG15 key, a valid Active Authentication response over that key is proven as an additional conjunct, binding the enrollment to a chip that holds a private key rather than to a copy of published bytes.
+\item \textbf{Derivation.} $\psec$ is recomputed from the DG1 bytes the inner proof committed to, and $\pid = \PT(\psec, \mathsf{APP\_SCOPE})$ from it. Recomputation matters for the same reason it does in the spend circuit: accepting $\pid$ as a free witness would sever the binding between the document and the tally chain the enrollment opens.
+\end{enumerate}
+
+It outputs an enrollment nullifier $E = \PT(\mathsf{DOM}_{\mathrm{enr}}, \pid)$ together with a genesis tally commitment $\Tcom(\pid, 0, d_{\mathrm{now}}, r)$. The pool rejects a duplicate $E$, which is what makes the enrollment one-per-document. The public trace is one opaque field element and one commitment, identical in shape for every holder. The residual metadata leak is the fact and timing of a single enrollment event per person, which batching and delay mitigate but do not eliminate.
 
 \subsection{The spend circuit}
 
@@ -321,6 +437,7 @@ Figure~\ref{fig:chain} traces the tally chain these rules produce across three c
 \end{figure}
 
 \subsection{Why the memo must be uniform}
+\label{sec:uniform}
 
 If only above-threshold spends carried a memo, its presence would announce a crossing, and an observer could identify precisely the transactions the mechanism was designed to keep ordinary. Fixing the memo's shape is therefore not an optimization but a requirement of the privacy argument. Every spend emits a ciphertext of identical size and structure, as shown in Figure~\ref{fig:memo}; only the auditor, decrypting all of them, distinguishes reports from dummies. This mirrors institutional practice, in which a bank observes every transaction and files a report on a subset, and it is the point at which our design departs from CAP~\cite{cap}, whose per-transaction trigger does not face the same cumulative-crossing side channel.
 
@@ -371,11 +488,16 @@ Per spend: two nullifiers, three fresh commitments, one memo, one proof, all of 
 We sketch the arguments; full proofs are deferred.
 
 \begin{theorem}[Person-binding]
-Under collision resistance of $\PT$ and soundness of the credential layer, Capita Protocol satisfies person-binding.
+Under collision resistance of $\PT$, soundness of the credential layer, and registry correctness, the number of live tally chains an adversary can maintain is at most the number of distinct pairs $(\mathit{state}, \mathit{docnum})$ for which it can produce a document whose Passive Authentication chain verifies.
 \end{theorem}
 \begin{proof}[Proof sketch]
-A live tally chain begins only at enrollment, which publishes $E = \PT(\mathsf{DOM}_{\mathrm{enr}}, \pid)$ and is rejected on duplicate $E$. Starting two chains under one credential therefore requires two distinct $\pid$ values from one passport, contradicting determinism of the derivation, or a collision in $\PT$. Starting a chain without a credential contradicts credential-layer soundness. Hence chains are at most the number of distinct credentials held.
+A live tally chain begins only at enrollment, which publishes $E = \PT(\mathsf{DOM}_{\mathrm{enr}}, \pid)$ and is rejected on duplicate $E$. Two chains under one document therefore require two distinct $\pid$ from one document. Since $\pid = \PT(\PT(\mathsf{DOM}_{\mathrm{pass}}, \mathit{state}, \mathit{docnum}), \mathsf{APP\_SCOPE})$ is a deterministic function of the pair alone, and enrollment recomputes it from the DG1 bytes the credential proof commits to rather than accepting it as a witness, this requires a collision in $\PT$. Starting a chain without a document requires a proof of the statement of Section~\ref{sec:credcircuit} for a chain terminating outside the registry, contradicting SNARK soundness, or an adversarial key inside it, contradicting registry correctness.
 \end{proof}
+
+\begin{remark}[The bound is on documents, not on humans]
+\label{rem:docsnothumans}
+Theorem~1 bounds chains by valid documents, and the gap between that quantity and the number of humans is where this construction's residual sybil surface lives in its entirety. Three routes widen it, and none is closed by cryptography. A dual national holds two genuine documents from two states and obtains two chains. A holder who reports a document lost obtains a replacement bearing a new $\mathit{docnum}$, and with it a new chain, on the issuing state's timescale rather than on the ten-year expiry cycle. And a person who borrows another's booklet can read its chip, because ICAO access control is keyed on data printed inside the document rather than on anything about its bearer. We regard the first as a genuine unsolved limitation, the second as rate-limited and evidence-generating rather than prevented, and the third as the reason sole possession appears as an explicit assumption in Section~\ref{sec:model} rather than as a claim. What the theorem does establish is that the multiplier is bounded by documents a state actually issued, which is the property account-bound systems lack entirely: there, the multiplier is bounded by nothing.
+\end{remark}
 
 \begin{theorem}[Limit soundness]
 Under SNARK soundness, binding of the commitment scheme, collision resistance of $\PT$, and correctness of nullifier bookkeeping, Capita Protocol satisfies limit soundness.
@@ -467,18 +589,33 @@ Second, and more important for the privacy argument, the below-threshold and abo
 
 Third, enrollment is cheap enough to be unremarkable at 322 gates, which matters because enrollment is the one event per person that is visible as such.
 
+\subsection{Projected cost of the credential layer}
+\label{sec:credcost}
+
+Tables~\ref{tab:sizes} and~\ref{tab:perf} measure the accounting and disclosure machinery specified in Sections~\ref{sec:notes} through~\ref{sec:uniform}. They do not measure the passport verification circuits of Section~\ref{sec:credcircuit}, for which we give projections from published figures for deployed systems rather than measurements of our own. We separate the two rather than combining them because a projection and a measurement are different kinds of claim and a reader is entitled to know which is which.
+
+Two things make the projection reasonably tight. ZKPassport verifies exactly the chain of Section~\ref{sec:icao} on consumer phones, and does so in Noir with the Barretenberg backend producing UltraHonk proofs~\cite{zkpassport}, which is the identical proving stack this work uses; its reported costs therefore transfer without a change of proof system. It reports base proofs, generated once per document and cached, at ten to fifty seconds on-device, varying with the issuing state's signature algorithm and the handset, and subsequent disclosure proofs at under one second to ten seconds. Independently, mobile proving benchmarks for an RSA PKCS\#1~v1.5 circuit with SHA-256 report roughly $6.5$\,s natively on an iPhone 14 Pro Max~\cite{mopro}.
+
+Three consequences follow for a deployment. The expensive work is one-time: $\mathcal{C}_{\mathrm{csca}}$ and $\mathcal{C}_{\mathrm{sod}}$ are proved once per document and cached, so the recurring per-transaction cost remains the spend circuit measured above, and enrollment is the only operation a user experiences as slow. Cost is not uniform across holders, because it tracks the issuing state's algorithm choice, which is precisely the correlation that motivates the uniformity mechanism of Section~\ref{sec:variant}; note that mechanism equalizes the \emph{observable} interface rather than the proving time, so a determined adversary with timing access retains a signal that batching and deferred submission, not circuit structure, must address. And memory, not time, is the binding constraint on older hardware: the same benchmarks record an RSA circuit requiring on the order of $5$\,GB and failing on handsets that cap application memory near $3$\,GB~\cite{mopro}, so a deployment must either restrict itself to devices above that bound or offload proving.
+
 \subsection{Threats to validity}
 
-Two gaps must be stated plainly. The credential layer is \emph{mocked}: the prototype accepts a pre-verified $\psec$ behind the interface of Section~\ref{sec:identity} rather than parsing and verifying passport chip signatures in-circuit. Our figures therefore measure the accounting and disclosure machinery that is our contribution, not an end-to-end passport-to-payment flow; published costs for passport verification circuits would have to be added for that. Second, we measure a prototype pool in a test harness, not integration with a production pool, so figures exclude on-chain verification gas and state-management overhead. Neither gap affects the security arguments of Section~\ref{sec:security}, which are stated over the abstract construction, but both bound what the numbers can be taken to show.
+Three limits bound what the numbers above can be taken to show. First and most important, the credential-layer costs of Section~\ref{sec:credcost} are projections from published figures for comparable systems, not measurements of our implementation of Section~\ref{sec:credcircuit}; they should be read as an argument that the layer is affordable on the stated stack, not as a report of what ours costs. Second, we measure a prototype pool in a test harness rather than integration with a production pool, so the figures exclude on-chain verification gas and state-management overhead. Third, all measurements come from a single machine and a single hardware architecture, so they establish an order of magnitude rather than portable constants. None of the three affects the security arguments of Section~\ref{sec:security}, which are stated over the abstract construction rather than over any implementation of it.
 
 \section{Discussion}
 \label{sec:discussion}
 
 \paragraph{What is not claimed.}
-Threshold-triggered disclosure is not new~\cite{chl2006,ggm16,prcash,cap}. The passport credential layer is not new~\cite{zkcreds}. Unlinkable value accumulation is not new~\cite{bbaplus,uacs}. The contribution is the composition and the specific mechanism that makes it non-trivial, namely pool-native tally notes with uniform memos.
+Threshold-triggered disclosure is not new~\cite{chl2006,ggm16,prcash,cap}. Verifying an ICAO passport chain in zero knowledge is not new~\cite{zkcreds,zkpassport}; Section~\ref{sec:identity} specifies rather than invents it, and the one part we do claim there is the observation and repair of the algorithm-variant leak in Section~\ref{sec:variant}. Unlinkable value accumulation is not new~\cite{bbaplus,uacs}. The contribution is the composition and the specific mechanism that makes it non-trivial, namely pool-native tally notes with uniform memos.
 
 \paragraph{Multiple citizenship.}
 A person holding two passports obtains two limit slots, hence $2T$. This is bounded, acknowledged, and unsolved by every personhood system we are aware of. Cross-document deduplication would require exactly the cross-state identity infrastructure the design exists to avoid.
+
+\paragraph{Replacement and borrowed documents.}
+Remark~\ref{rem:docsnothumans} states the two remaining routes from documents to identities, and both deserve the plain version. A holder who reports a passport lost receives a replacement bearing a new document number, and with it a fresh limit, on a timescale set by the issuing state rather than by the ten-year expiry cycle; the defence is that each instance costs a genuine application to a state that keeps records of exactly this pattern, so the attack is rate-limited and evidence-generating rather than prevented. A holder who borrows another person's booklet can read its chip, because the access key of Section~\ref{sec:chipread} is derived from the data page rather than from anything about the bearer, so what the credential layer proves is possession rather than ownership. Biometric comparison against DG2 would narrow this, at the price of introducing exactly the biometric processing that a privacy-motivated design should be reluctant to require, and we do not adopt it.
+
+\paragraph{Who is excluded.}
+The construction inherits the coverage of the credential it consumes, and passport coverage is deeply unequal. In several populous states, including India, chip-bearing documents were introduced only recently and non-chip passports remain valid until they expire, so for years to come a majority of nationals cannot enroll at all. A limit regime that only the passport-holding minority can participate in is not a neutral technical artifact, and we do not present universal deployment as near. The mitigation is architectural rather than rhetorical: the credential layer is decoupled from the accounting layer through a single field element, so any credential admitting a deterministic per-person secret substitutes without touching the construction. National digital identity schemes with government-signed attributes, of which India's is the largest, are the obvious candidate, and supporting one alongside passports is the most consequential piece of future work in this paper.
 
 \paragraph{Consenting proxies.}
 A person routing spends through another consenting person's allowance is a conspiracy of humans, addressed by law rather than cryptography. The system still bounds total flow to $q \cdot T$ for $q$ participating humans, which we state as a property rather than conceal as a defect: it is precisely the guarantee the banking rule provides, since a bank likewise cannot prevent one customer from asking another to make a deposit.
@@ -496,7 +633,7 @@ One tally chain per person serializes that person's spends, which a wallet can o
 
 We have shown that a regulatory requirement usually taken to demand a central registry, namely per-person aggregation of transaction volume, can instead be met cryptographically, in a permissionless shielded pool, with no registrar and no persistent linkable identifier. The mechanism is a per-person tally note living in the payment pool's own commitment tree, updated by every spend from every wallet the person controls, paired with a uniform disclosure memo that prevents the compliance mechanism from becoming the very side channel it was meant to avoid. A working implementation shows the cost is roughly one tenth of a second of proving for a complete spend, with threshold position not observable in either timing or size.
 
-Several directions remain. Integrating a real passport verification circuit would close the largest gap between the prototype and a deployable system. Rolling-window accounting, in which the tally note carries a vector of day buckets rather than a single day, would close the boundary case in which a person spends $T$ shortly before and shortly after a period rollover; we note that this behavior is compliant under the business-day semantics of~\cite{cfr1010313}, so the extension tightens a rule rather than fixing a defect. Threshold distribution of the auditor key, receive-side aggregation, credential revocation, and additional credential types such as national digital identity schemes are all natural extensions. Finally, a full simulation-based treatment in the universal composability framework would strengthen the game-based analysis given here.
+Several directions remain. The credential layer is specified in Section~\ref{sec:identity} but its circuits are not yet measured in our implementation, and reporting them alongside the accounting figures is the immediate next step. Supporting a national digital identity scheme alongside passports would address the coverage gap that Section~\ref{sec:discussion} concedes is the construction's sharpest practical limitation. Rolling-window accounting, in which the tally note carries a vector of day buckets rather than a single day, would close the boundary case in which a person spends $T$ shortly before and shortly after a period rollover; we note that this behavior is compliant under the business-day semantics of~\cite{cfr1010313}, so the extension tightens a rule rather than fixing a defect. Threshold distribution of the auditor key, receive-side aggregation, credential revocation, and additional credential types such as national digital identity schemes are all natural extensions. Finally, a full simulation-based treatment in the universal composability framework would strengthen the game-based analysis given here.
 
 \paragraph{Availability.}
 The implementation, specification, and benchmark harness are available at \url{https://github.com/yashhzd/capita}.
@@ -538,6 +675,18 @@ A. Tomescu, A. Bhat, B. Applebaum, I. Abraham, G. Gueta, B. Pinkas, and A. Yanai
 
 \bibitem{cap}
 Espresso Systems. \emph{Configurable Asset Privacy (CAP)}. \url{https://github.com/EspressoSystems/cap}, 2022.
+
+\bibitem{icao9303}
+International Civil Aviation Organization. \emph{Doc 9303, Machine Readable Travel Documents}, Eighth Edition, 2021. Part 10 (logical data structure), Part 11 (security mechanisms), Part 12 (public key infrastructure).
+
+\bibitem{rfc5652}
+R. Housley. \emph{Cryptographic Message Syntax (CMS)}. RFC 5652, Internet Engineering Task Force, September 2009.
+
+\bibitem{zkpassport}
+ZKPassport. \emph{Documentation and circuits for passport and national ID zero-knowledge proofs}. \url{https://docs.zkpassport.id}, and \url{https://github.com/zkpassport/circuits}.
+
+\bibitem{mopro}
+Mopro contributors. \emph{Mobile proving performance and benchmarks}. \url{https://zkmopro.org/docs/performance/}.
 
 \bibitem{payoff}
 C. Beer, S. Zingg, K. Kostiainen, K. W\"ust, V. Capkun, and S. Capkun. PayOff: A regulated central bank digital currency with private offline payments. arXiv:2408.06956, 2024.

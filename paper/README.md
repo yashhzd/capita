@@ -42,9 +42,11 @@ Reported figures were taken on an Apple M4 Max (14 cores, 36 GB) under macOS 26.
 
 ## Citations
 
-All 30 references were checked against primary sources (IACR ePrint, arXiv, publisher pages,
+All 34 references were checked against primary sources (IACR ePrint, arXiv, publisher pages,
 EUR-Lex, eCFR). The first 28 were verified on 2026-08-05; PayOff and ul-PCS were added and
-verified on 2026-08-06. Titles, author lists, and venues match the record.
+verified on 2026-08-06, along with ICAO Doc 9303, RFC 5652, and the ZKPassport and Mopro
+sources cited for the credential-layer cost projections. Titles, author lists, and venues
+match the record.
 
 ul-PCS is cited as an ePrint report with no venue, because the ePrint page lists none. Do not
 add one without checking the archive first.
@@ -67,9 +69,23 @@ Two substantive corrections came out of the same pass and are worth not regressi
 
 ## Before submission
 
-- **Mocked credential layer.** The prototype accepts a pre-verified `person_secret` instead of
-  verifying passport chip signatures in-circuit. Disclosed in the threats-to-validity
-  subsection. Either implement it or add published passport-circuit costs to the evaluation.
+- **Credential layer: specified, not yet measured.** Section 4.2 now specifies the whole thing
+  (ICAO chain, PACE chip access, the three-circuit split, `psec` derivation, CSCA registry, the
+  algorithm-variant leak and its fix). The circuits are not built, so Section 6.4 gives
+  *projections* from published ZKPassport and Mopro figures rather than measurements.
+
+  When the circuits land, exactly four things change and nothing else:
+  1. Add rows for `C_csca`, `C_sod`, `C_der` to Table 2 (gates) and Table 3 (timings).
+  2. Retitle §6.4 from "Projected cost of the credential layer" to "Cost of the credential
+     layer" and replace the projection paragraphs with measurements, keeping the `[13]`/`[14]`
+     comparison to published figures as a cross-check.
+  3. Delete the first item in §6.5 "Threats to validity" (the one saying costs are projections).
+  4. Drop the first sentence of the Future Work paragraph in §8, which says the circuits are
+     not yet measured.
+
+  Do **not** report numbers for these circuits before they exist. The projections are labelled
+  as projections in five places (abstract, §6.4 opening, §6.4 body, §6.5, §8) and every one of
+  those labels has to come out together, or the paper claims something false.
 - **Proofs are sketches.** Section 5 gives game-based definitions with proof sketches. Adequate
   for a preprint; a top-tier venue will likely want full proofs, and the UC treatment is
   named as future work.
