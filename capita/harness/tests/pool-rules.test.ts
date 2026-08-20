@@ -6,8 +6,9 @@ import { MerkleTree, type Path } from "../src/merkle.js";
 import { noteNullifier, ownerPk, paymentCommit, personId, tallyCommit } from "../src/notes.js";
 import { Pool, type EnrollOutput, type SpendPublicInputs } from "../src/pool.js";
 import { MERKLE_DEPTH, P, T_THRESHOLD } from "../src/constants.js";
-import { GRUMPKIN_ORDER, negate, type Pt } from "../src/grumpkin.js";
-import { decrypt, encrypt, keygen, type Limbs } from "../src/elgamal.js";
+import { GRUMPKIN_ORDER, INF, negate, type Pt } from "../src/grumpkin.js";
+import { decrypt, encrypt, keygen, type Limbs, type Memo } from "../src/elgamal.js";
+import { collect } from "../src/auditor.js";
 
 // Task 9: the pool's spend acceptance rules and its day clock.
 //
@@ -30,7 +31,11 @@ const ENROLLMENT_DIR = fileURLToPath(
 );
 const toHex = (v: bigint) => "0x" + v.toString(16);
 const MASK_128 = (1n << 128n) - 1n;
-const DAY = 20260804n;
+// An opaque period index, NOT a date -- see Pool.currentDay. This is the
+// suite that exercises advanceDay, so it uses a plain counter: a
+// YYYYMMDD-shaped fixture would make `DAY + 1n` read as "the next day" and
+// quietly mislead, since 20260831 + 1 is not one.
+const DAY = 900n;
 
 // The pool's configured auditor key. ASK never leaves the auditor.
 const ASK = 271828n;
@@ -1015,6 +1020,287 @@ test(
     expect(b.status).toBe("fulfilled");
     expect(pool.currentDay).toBe(DAY + 1n);
     expect(pool.tree.leafCount()).toBe(5);
+  },
+);
+
+test(
+  "an accepted record is a snapshot: mutating the submission cannot void the disclosure",
+  { timeout: 120_000 },
+  async () => {
+    // The transcript is the auditor's evidence base, so it must not alias
+    // the payer's object. Storing `pub` by reference let a payer settle a
+    // crossing spend, be collected correctly, and THEN reach back into the
+    // record they still held and blank the memo -- the silent disclosure
+    // void of hand-off 2, reopened on the far side of acceptance.
+    const personSecret = 9117n;
+    const rT = 97n;
+    const aliceSk = 1127n;
+    const { pool, depositIndex } = await setupPool(personSecret, rT, aliceSk);
+    const pid = await personId(personSecret);
+
+    const sp = await runSpend({
+      personSecret,
+      vIn: 20000n,
+      ownerSk: aliceSk,
+      rIn: BigInt(depositIndex),
+      pathIn: pool.tree.path(depositIndex),
+      v1: 15000n,
+      pk1: await ownerPk(2222n),
+      r1: 971n,
+      v2: 5000n,
+      r2: 972n,
+      sOld: 0n,
+      dOld: DAY,
+      rT,
+      pathT: pool.tree.path(0),
+      rTNew: 973n,
+      rEnc: 9701n,
+      root: pool.tree.root(),
+      dNow: DAY,
+    });
+
+    await pool.spend(sp);
+    const owed = [{ personId: pid, subtotal: 15000n, day: DAY }];
+    expect(await collect(pool.spendLog.map((r) => r.memo), ASK)).toEqual(owed);
+
+    // The payer still holds their submission. Everything they can reach
+    // must be a different object from what the pool kept.
+    expect(pool.spendLog[0]).not.toBe(sp);
+    expect(pool.spendLog[0].memo).not.toBe(sp.memo);
+    expect(pool.spendLog[0].memo.c1).not.toBe(sp.memo.c1);
+    expect(pool.spendLog[0].memo.ct).not.toBe(sp.memo.ct);
+
+    // Blank the memo and rewrite the declared inputs on their copy.
+    sp.memo.ct[0] = 0n;
+    sp.memo.ct[1] = 0n;
+    sp.memo.ct[2] = 0n;
+    sp.memo.ct[3] = 0n;
+    sp.memo.c1 = INF;
+    sp.dNow = 999n;
+    sp.tThreshold = (1n << 64n) - 1n;
+
+    // The transcript is unmoved and the disclosure still stands.
+    expect(pool.spendLog[0].dNow).toBe(DAY);
+    expect(pool.spendLog[0].tThreshold).toBe(T_THRESHOLD);
+    expect(await collect(pool.spendLog.map((r) => r.memo), ASK)).toEqual(owed);
+  },
+);
+
+test(
+  "a structurally invalid memo is rejected on acceptance",
+  { timeout: 120_000 },
+  async () => {
+    // The pool stores memos it never inspected, and one malformed record
+    // poisons the auditor's whole collection run: an infinite c1 makes
+    // decrypt throw, taking down every honest disclosure in the batch. An
+    // off-curve or non-canonical c1 is worse than useless -- it decrypts to
+    // nothing recoverable while looking like a settled disclosure.
+    //
+    // Task 11 does NOT cover this. The circuit ABI carries c1 as
+    // [Field; 2], but the harness Pt carries a third field, `inf`, with no
+    // ABI counterpart -- so {x: realX, y: realY, inf: true} satisfies any
+    // coordinate-based proof binding and still breaks decrypt.
+    const personSecret = 9118n;
+    const rT = 98n;
+    const aliceSk = 1128n;
+    const { pool, depositIndex } = await setupPool(personSecret, rT, aliceSk);
+
+    const sp = await runSpend({
+      personSecret,
+      vIn: 20000n,
+      ownerSk: aliceSk,
+      rIn: BigInt(depositIndex),
+      pathIn: pool.tree.path(depositIndex),
+      v1: 15000n,
+      pk1: await ownerPk(2222n),
+      r1: 981n,
+      v2: 5000n,
+      r2: 982n,
+      sOld: 0n,
+      dOld: DAY,
+      rT,
+      pathT: pool.tree.path(0),
+      rTNew: 983n,
+      rEnc: 9801n,
+      root: pool.tree.root(),
+      dNow: DAY,
+    });
+    const good = sp.memo;
+
+    const broken: [string, Memo][] = [
+      // The reviewer's probe: a real execution submitted with a blanked memo.
+      ["infinite c1", { c1: INF, ct: [0n, 0n, 0n, 0n] }],
+      ["off-curve c1", { c1: { x: 1n, y: 2n, inf: false }, ct: good.ct }],
+      // On-curve by the mod-P equation, but outside [0, P) -- grumpkin's
+      // group law compares x raw, so an unnormalized point misbehaves.
+      [
+        "non-canonical c1 coordinate",
+        { c1: { x: good.c1.x + P, y: good.c1.y, inf: false }, ct: good.ct },
+      ],
+      [
+        "non-canonical ct limb",
+        { c1: good.c1, ct: [good.ct[0], good.ct[1], good.ct[2], P] },
+      ],
+    ];
+
+    for (const [label, memo] of broken) {
+      await expect(pool.spend({ ...sp, memo }), label).rejects.toThrow("invalid-memo");
+      expect(pool.seenNullifiers.size, label).toBe(0);
+      expect(pool.tree.leafCount(), label).toBe(2);
+      expect(pool.spendLog, label).toHaveLength(0);
+    }
+
+    // The well-formed memo still settles.
+    await pool.spend(sp);
+    expect(pool.spendLog).toHaveLength(1);
+  },
+);
+
+test("collect survives a record it cannot decrypt", async () => {
+  // Defence in depth for the auditor, who may read memos that never came
+  // from this pool. A structurally invalid record carries no recoverable
+  // plaintext, so skipping it discards nothing -- but throwing would
+  // discard every honest disclosure batched with it.
+  const pid = await personId(4242n);
+  const real = await encrypt([1n, pid, 15000n, DAY], APK, 1234n);
+  const poisoned: Memo = { c1: INF, ct: [0n, 0n, 0n, 0n] };
+
+  expect(await collect([real, poisoned], ASK)).toEqual([
+    { personId: pid, subtotal: 15000n, day: DAY },
+  ]);
+  // Order must not matter: the bad record cannot shadow a later good one.
+  expect(await collect([poisoned, real], ASK)).toEqual([
+    { personId: pid, subtotal: 15000n, day: DAY },
+  ]);
+});
+
+test(
+  "a storage failure between inserts still leaves the consumed notes burnt",
+  { timeout: 120_000 },
+  async () => {
+    // The fail-closed ordering, pinned. A spend performs three inserts, and
+    // the pre-checks make every PREDICTABLE failure impossible -- but if the
+    // store fails anyway, the consumed notes must already be burnt.
+    // Destroying value beats leaving it spendable twice: inflation is the
+    // worst class of bug in a shielded pool.
+    const personSecret = 9119n;
+    const rT = 99n;
+    const aliceSk = 1129n;
+    const { pool, depositIndex } = await setupPool(personSecret, rT, aliceSk);
+
+    const sp = await runSpend({
+      personSecret,
+      vIn: 20000n,
+      ownerSk: aliceSk,
+      rIn: BigInt(depositIndex),
+      pathIn: pool.tree.path(depositIndex),
+      v1: 6000n,
+      pk1: await ownerPk(2222n),
+      r1: 991n,
+      v2: 14000n,
+      r2: 992n,
+      sOld: 0n,
+      dOld: DAY,
+      rT,
+      pathT: pool.tree.path(0),
+      rTNew: 993n,
+      rEnc: 9901n,
+      root: pool.tree.root(),
+      dNow: DAY,
+    });
+
+    // Fail the SECOND insert, so the sequence dies partway through.
+    const realInsert = pool.tree.insert.bind(pool.tree);
+    let calls = 0;
+    pool.tree.insert = async (leaf: bigint) => {
+      calls += 1;
+      if (calls === 2) throw new Error("simulated storage failure");
+      return realInsert(leaf);
+    };
+
+    await expect(pool.spend(sp)).rejects.toThrow("simulated storage failure");
+
+    // Both consumed notes are burnt, so neither can be spent again...
+    expect(pool.seenNullifiers.has(sp.nPay.toString())).toBe(true);
+    expect(pool.seenNullifiers.has(sp.nTally.toString())).toBe(true);
+    // ...the spend never settled, so it is not on the transcript...
+    expect(pool.spendLog).toHaveLength(0);
+    // ...one leaf did land, and the root it produced was never recorded, so
+    // no later proof can build on the half-written state. Recovering from a
+    // real storage fault needs the operator, which is the intended outcome.
+    expect(pool.tree.leafCount()).toBe(3);
+    expect(pool.rootHistory.has(pool.tree.root().toString())).toBe(false);
+  },
+);
+
+test(
+  "after advanceDay a spend dated the new period is accepted and its subtotal resets",
+  { timeout: 120_000 },
+  async () => {
+    // The legitimate counterpart to the tomorrow-dating evasion, and the
+    // pin on what advanceDay actually means: it moves the clock to exactly
+    // the period a next-period spend must declare. Days are opaque
+    // consecutive indices, so this is `+ 1n` in both places or neither.
+    const personSecret = 9120n;
+    const rT = 100n;
+    const aliceSk = 1130n;
+    const { pool, depositIndex } = await setupPool(personSecret, rT, aliceSk);
+    const pid = await personId(personSecret);
+    const bobPk = await ownerPk(2222n);
+
+    const first = await runSpend({
+      personSecret,
+      vIn: 20000n,
+      ownerSk: aliceSk,
+      rIn: BigInt(depositIndex),
+      pathIn: pool.tree.path(depositIndex),
+      v1: 9900n,
+      pk1: bobPk,
+      r1: 1001n,
+      v2: 10100n,
+      r2: 1002n,
+      sOld: 0n,
+      dOld: DAY,
+      rT,
+      pathT: pool.tree.path(0),
+      rTNew: 1003n,
+      rEnc: 10001n,
+      root: pool.tree.root(),
+      dNow: DAY,
+    });
+    await pool.spend(first);
+
+    await pool.advanceDay();
+    expect(pool.currentDay).toBe(DAY + 1n);
+
+    // The same 5000 that was an evasion when self-dated is legitimate now
+    // that the pool's own clock has moved: subtotal restarts, memo dummy.
+    const next = await runSpend({
+      personSecret,
+      vIn: 10100n,
+      ownerSk: aliceSk,
+      rIn: 1002n,
+      pathIn: pool.tree.path(3),
+      v1: 5000n,
+      pk1: bobPk,
+      r1: 1004n,
+      v2: 5100n,
+      r2: 1005n,
+      sOld: 9900n,
+      dOld: DAY,
+      rT: 1003n,
+      pathT: pool.tree.path(4),
+      rTNew: 1006n,
+      rEnc: 10002n,
+      root: pool.tree.root(),
+      dNow: DAY + 1n,
+    });
+    await pool.spend(next);
+
+    expect(await decrypt(next.memo, ASK)).toEqual([0n, 0n, 0n, 0n]);
+    expect(next.cTallyNew).toBe(await tallyCommit(pid, 5000n, DAY + 1n, 1006n));
+    expect(pool.tree.leafCount()).toBe(8);
+    expect(pool.spendLog).toHaveLength(2);
   },
 );
 

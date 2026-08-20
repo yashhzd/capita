@@ -2,7 +2,7 @@ import { afterAll, expect, test } from "vitest";
 import { P } from "../src/constants.js";
 import { closePoseidon, p2 } from "../src/poseidon.js";
 import { G, GRUMPKIN_ORDER, INF, add, isOnCurve, mul, negate } from "../src/grumpkin.js";
-import { decrypt, encrypt, keygen } from "../src/elgamal.js";
+import { decrypt, encrypt, isWellFormedMemo, keygen } from "../src/elgamal.js";
 
 afterAll(async () => {
   await closePoseidon();
@@ -128,4 +128,31 @@ test("p2 range guard: rejects P and -1n, accepts P-1", async () => {
   await expect(p2([-1n])).rejects.toThrow(/out of field range/);
   await expect(p2([1n, P])).rejects.toThrow(/out of field range/);
   expect(typeof (await p2([P - 1n]))).toBe("bigint");
+});
+
+// isWellFormedMemo is the single predicate the pool applies before storing a
+// memo and the auditor applies before decrypting one. It is shared precisely
+// so the two cannot drift: a memo the pool would admit must be one collect
+// can decrypt.
+
+test("isWellFormedMemo accepts a real memo and rejects every degenerate shape", async () => {
+  const good = await encrypt([1n, 2n, 3n, 4n], keygen(5n), 42n);
+  expect(isWellFormedMemo(good)).toBe(true);
+
+  // c1 must be a genuine, finite, canonical curve point: an infinite c1
+  // makes decrypt's shared secret degenerate, and grumpkin's group law
+  // compares x with raw bigint equality, so an unnormalized coordinate
+  // takes the wrong branch even though it satisfies the curve equation.
+  expect(isWellFormedMemo({ ...good, c1: INF })).toBe(false);
+  expect(isWellFormedMemo({ ...good, c1: { x: 1n, y: 2n, inf: false } })).toBe(false);
+  expect(
+    isWellFormedMemo({ ...good, c1: { x: good.c1.x + P, y: good.c1.y, inf: false } }),
+  ).toBe(false);
+  expect(
+    isWellFormedMemo({ ...good, c1: { x: good.c1.x, y: good.c1.y + P, inf: false } }),
+  ).toBe(false);
+
+  // Every ciphertext limb is a field element; P and -1n are not.
+  expect(isWellFormedMemo({ ...good, ct: [good.ct[0], good.ct[1], good.ct[2], P] })).toBe(false);
+  expect(isWellFormedMemo({ ...good, ct: [-1n, good.ct[1], good.ct[2], good.ct[3]] })).toBe(false);
 });

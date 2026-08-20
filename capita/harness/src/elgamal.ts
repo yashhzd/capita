@@ -1,5 +1,5 @@
 import { P } from "./constants.js";
-import { G, mul, type Pt } from "./grumpkin.js";
+import { G, isOnCurve, mul, type Pt } from "./grumpkin.js";
 import { p2 } from "./poseidon.js";
 
 // Hash-ElGamal over Grumpkin for the encrypted disclosure memo. Every
@@ -24,6 +24,31 @@ export type Memo = { c1: Pt; ct: Limbs };
 
 export function keygen(sk: bigint): Pt {
   return mul(sk, G);
+}
+
+const inField = (v: bigint): boolean => v >= 0n && v < P;
+
+/**
+ * Whether `memo` is structurally decryptable: a finite, canonical, on-curve
+ * ephemeral point plus four canonical field limbs.
+ *
+ * Shared deliberately between the pool, which refuses to STORE a memo that
+ * fails this, and the auditor, which refuses to DECRYPT one -- so the two
+ * cannot drift and every memo the pool admits is one `decrypt` can process.
+ *
+ * The coordinate range check is not redundant with the curve equation:
+ * `isOnCurve` reduces mod P, so `x + P` satisfies it, while the group law in
+ * grumpkin.ts compares x with raw bigint equality and would take the chord
+ * branch where the tangent applies. An infinite c1 is rejected for a
+ * different reason -- it drives `decrypt`'s shared secret to the identity,
+ * which throws.
+ */
+export function isWellFormedMemo(memo: Memo): boolean {
+  const { c1, ct } = memo;
+  if (c1.inf || !inField(c1.x) || !inField(c1.y) || !isOnCurve(c1)) {
+    return false;
+  }
+  return ct.every(inField);
 }
 
 // pad_i = p2([S.x, S.y, i]). Coordinates are < P by construction and i is

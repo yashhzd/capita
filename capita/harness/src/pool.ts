@@ -1,5 +1,5 @@
 import { MERKLE_DEPTH, P, T_THRESHOLD } from "./constants.js";
-import { type Memo } from "./elgamal.js";
+import { isWellFormedMemo, type Memo } from "./elgamal.js";
 import { type Pt } from "./grumpkin.js";
 import { MerkleTree } from "./merkle.js";
 import { paymentCommit } from "./notes.js";
@@ -51,7 +51,7 @@ export interface EnrollOutput {
 export interface SpendPublicInputs {
   /** Tree root the membership proofs were made against. */
   root: bigint;
-  /** Day the prover dated the spend. */
+  /** Period index the prover dated the spend to; see `Pool.currentDay`. */
   dNow: bigint;
   /** Disclosure threshold the prover declared. */
   tThreshold: bigint;
@@ -133,10 +133,24 @@ export class Pool {
   }
 
   /**
-   * The day every submission is judged against. Read-only from outside:
-   * a caller that could assign it would move the clock outside the queue,
-   * which is the same subtotal-reset bypass as an unpinned `d_now`, just
-   * reached from the operator's side.
+   * The period every submission is judged against.
+   *
+   * This is an OPAQUE MONOTONIC COUNTER, not a date. The protocol needs
+   * only two things of it: consecutive business days get consecutive
+   * indices, and `advanceDay` moves to the next one. The spend circuit
+   * agrees -- it tests days for equality and ordering and never does
+   * arithmetic on them -- so the encoding is free, and mapping wall-clock
+   * business days onto indices is the deployment's job, outside the pool.
+   *
+   * Consequently a YYYYMMDD-shaped value is NOT a valid encoding here, and
+   * where the older suites use one it is a cosmetic label that happens to
+   * be monotonic; those suites never call `advanceDay`. Reading such a
+   * value as a date is the trap this comment exists to close, because
+   * 20260831 + 1 is 20260832, which is not a day.
+   *
+   * Read-only from outside: a caller that could assign it would move the
+   * clock outside the queue, which is the same subtotal-reset bypass as an
+   * unpinned `d_now`, just reached from the operator's side.
    */
   get currentDay(): bigint {
     return this.day;
@@ -228,8 +242,9 @@ export class Pool {
    *  2. `dNow` is today -- `"wrong-day"`
    *  3. `tThreshold` is the policy constant -- `"wrong-threshold"`
    *  4. `(apkX, apkY)` is the configured auditor key -- `"wrong-auditor-key"`
-   *  5. neither nullifier is already burnt -- `"double-spend"`
-   *  6. the new tally is not already a leaf -- `"duplicate-tally"`
+   *  5. the memo is a decryptable ciphertext -- `"invalid-memo"`
+   *  6. neither nullifier is already burnt -- `"double-spend"`
+   *  7. the new tally is not already a leaf -- `"duplicate-tally"`
    *
    * then admits: burns both nullifiers, inserts `cOut1`, `cOut2`,
    * `cTallyNew` in that order, records the new root, and appends the record
@@ -257,10 +272,30 @@ export class Pool {
    *   would insert a note whose nullifier was just burnt, ending the payer's
    *   tally chain and with it their ability to spend. Self-harm only -- no
    *   one else can produce a leaf carrying their `person_id` -- but the pool
-   *   should not knowingly store a dead note. The rule is deliberately
-   *   confined to the tally: payment outputs are NOT deduplicated, since
-   *   anyone watching submissions could otherwise pre-empt an honest payer's
-   *   `cOut1` and have their spend rejected.
+   *   should not knowingly store a dead note.
+   * - The rule is deliberately confined to the tally. Payment outputs are
+   *   NOT deduplicated, because a duplicate payment leaf is harmless: it
+   *   shares the original's nullifier, so it can still be spent only once,
+   *   and it cannot mint value because it came out of a value-conserving
+   *   circuit. The only way to produce one is to reuse your own salt, which
+   *   costs you a note and costs nobody else anything, so deduplicating
+   *   payment outputs would be a usability guard rather than a security
+   *   control. Note that the reach of an attacker does not enter into it:
+   *   no insertion path lets any actor place a CHOSEN field element in the
+   *   tree -- `enroll` inserts a circuit-output `C_t`, `deposit` inserts a
+   *   commitment whose salt the pool fixes to the leaf index, and `spend`
+   *   inserts three circuit-derived commitments -- so every leaf is a
+   *   Poseidon2 image, and aiming at an existing digest would mean
+   *   inverting it.
+   * - The memo is checked for structure, not content: the circuit already
+   *   proved it encrypts the required message, but nothing there constrains
+   *   the SHAPE the operator receives. A memo whose `c1` is the identity
+   *   makes the auditor's `decrypt` throw, and one bad record would take
+   *   down the honest disclosures batched with it; an off-curve or
+   *   non-canonical `c1` yields nothing recoverable while still looking
+   *   settled. Task 11 does not subsume this: the ABI carries `c1` as
+   *   `[Field; 2]`, while the harness point carries a third field, `inf`,
+   *   with no ABI counterpart to bind.
    *
    * Validation runs to completion before any state changes -- including the
    * range and capacity checks that `tree.insert` would otherwise raise
@@ -289,6 +324,9 @@ export class Pool {
       }
       if (pub.apkX !== this.auditorKey.x || pub.apkY !== this.auditorKey.y) {
         throw new Error("wrong-auditor-key");
+      }
+      if (!isWellFormedMemo(pub.memo)) {
+        throw new Error("invalid-memo");
       }
       const nPay = pub.nPay.toString();
       const nTally = pub.nTally.toString();
@@ -319,14 +357,30 @@ export class Pool {
         await this.tree.insert(commit);
       }
       this.rootHistory.add(this.tree.root().toString());
-      this.spendLog.push(pub);
+      // A SNAPSHOT, not the caller's object. The transcript is the
+      // auditor's evidence base, so it must not alias something the payer
+      // still holds a reference to: storing `pub` directly let a payer
+      // settle a crossing spend, be collected correctly, and then blank the
+      // memo they had submitted -- voiding their own disclosure after the
+      // fact. Only `memo` needs deep handling; every other field is a
+      // bigint, copied by value.
+      this.spendLog.push({
+        ...pub,
+        memo: {
+          c1: { ...pub.memo.c1 },
+          ct: [pub.memo.ct[0], pub.memo.ct[1], pub.memo.ct[2], pub.memo.ct[3]],
+        },
+      });
     });
   }
 
   /**
-   * Rolls the pool over to the next day, resetting nothing: subtotals are
-   * carried inside each person's tally note, so a spend dated on the new
-   * day restarts its own subtotal in-circuit.
+   * Rolls the pool over to the next period, resetting nothing: subtotals
+   * are carried inside each person's tally note, so a spend dated on the
+   * new period restarts its own subtotal in-circuit.
+   *
+   * `+ 1n` is exact because `currentDay` counts periods rather than
+   * encoding dates -- see the note there before giving it calendar meaning.
    *
    * Queued like every other operation (class invariant), so spends
    * submitted before the rollover are still judged against the old day and
