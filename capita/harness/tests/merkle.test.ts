@@ -46,6 +46,21 @@ test("empty tree root is the precomputed all-zeros root, and stable across insta
   expect(a.root()).toBe(expected);
 });
 
+// hasLeaf is how the pool refuses to admit a note it can already see is
+// dead (Task 9's duplicate-tally rule), so it must track exactly the leaves
+// that were actually stored -- not the ones that were merely offered.
+test("hasLeaf reports stored leaves only", async () => {
+  const t = new MerkleTree();
+  expect(t.hasLeaf(42n)).toBe(false);
+  await t.insert(42n);
+  expect(t.hasLeaf(42n)).toBe(true);
+  expect(t.hasLeaf(43n)).toBe(false);
+
+  // A rejected insert must leave no trace in the leaf set either.
+  await expect(t.insert(P + 5n)).rejects.toThrow(RangeError);
+  expect(t.hasLeaf(P + 5n)).toBe(false);
+});
+
 // Regression: an out-of-range leaf used to enter `leaves` before rebuild()
 // hit p2's range guard, leaving an unhashable value inside the tree that
 // made every subsequent insert throw forever. The guard must run before

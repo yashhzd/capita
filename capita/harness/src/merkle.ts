@@ -47,6 +47,10 @@ const ZERO_HASHES: bigint[] = await computeZeroHashes(MERKLE_DEPTH);
  */
 export class MerkleTree {
   private leaves: bigint[] = [];
+  // Membership index over `leaves`, keyed by decimal bigint string (the
+  // harness-wide set-key encoding). Kept in step with `leaves` so the pool
+  // can ask whether a commitment is already stored without a linear scan.
+  private leafSet = new Set<string>();
   // levels[0] holds the real leaves inserted so far; levels[k] holds the
   // internal nodes at height k, derived from levels[k-1]; levels[MERKLE_DEPTH]
   // is a single-element array holding the current root once at least one
@@ -68,6 +72,7 @@ export class MerkleTree {
     }
     const index = this.leaves.length;
     this.leaves.push(leaf);
+    this.leafSet.add(leaf.toString());
     await this.rebuild();
     return index;
   }
@@ -79,6 +84,16 @@ export class MerkleTree {
   /** Number of leaves inserted so far -- equally, the next insert's index. */
   leafCount(): number {
     return this.leaves.length;
+  }
+
+  /**
+   * Whether `leaf` is already stored in the tree. The pool uses this to
+   * refuse a note it can see is dead on arrival -- a new tally commitment
+   * that duplicates an existing leaf is the note whose nullifier the same
+   * spend is burning (see Pool.spend's duplicate-tally rule).
+   */
+  hasLeaf(leaf: bigint): boolean {
+    return this.leafSet.has(leaf.toString());
   }
 
   path(index: number): Path {
