@@ -246,8 +246,22 @@ async function auditorView() {
 // of fixed shape; and per-person state never visible as a repeated value).
 // So the sweep below walks records structurally rather than checking a
 // hand-listed set of fields: a field added later is swept automatically,
-// and a field that is not a field element is COUNTED rather than skipped,
-// so nothing can hide from the search in another representation.
+// and a value that is not a field element is COUNTED rather than skipped,
+// so it cannot hide from the search by changing representation.
+//
+// That second property is easy to write and easy to get wrong, and an
+// earlier version of this file did. Enumerating with `Object.values` and
+// recursing into every object silently misses Map and Set contents,
+// non-enumerable properties and Symbol keys -- and, worse, such a value
+// lands in NEITHER bucket, so it defeats the count pins too. `pid_A` could
+// be hidden three separate ways with the whole file green. `walk` therefore
+// enumerates own keys and treats only PLAIN objects and arrays as
+// transparent; everything else is counted, not entered.
+//
+// The lesson generalises past this file: a mutation matrix proves the
+// assertions bite on the values they name, and says nothing about whether
+// the instrument surveys the surface it claims to. When a test's value is
+// COVERAGE, mutate the surface and the representation, not just the values.
 
 /**
  * Recursively splits a value into the field elements it contains and
@@ -260,12 +274,30 @@ function walk(value: unknown, fields: bigint[], others: unknown[]): void {
     fields.push(value);
     return;
   }
+  // Own keys, not `Object.values`: a non-enumerable or Symbol-keyed property
+  // is still a property of the published record, and enumerating by value
+  // would step straight past it.
   if (Array.isArray(value)) {
-    for (const item of value) walk(item, fields, others);
+    for (const key of Reflect.ownKeys(value)) {
+      if (key === "length") continue;
+      walk((value as unknown as Record<PropertyKey, unknown>)[key], fields, others);
+    }
     return;
   }
-  if (typeof value === "object" && value !== null) {
-    for (const item of Object.values(value)) walk(item, fields, others);
+  // Only a PLAIN object is transparent. Anything exotic -- a Map, a Set, a
+  // Date, a typed array, a class instance, a null-prototype object -- is
+  // COUNTED as an other rather than recursed into. That distinction is the
+  // whole point: recursing into a container we cannot enumerate faithfully
+  // would let a value hide from BOTH buckets at once, so it would defeat the
+  // count pins as well as the search. Landing in `others` makes it loud.
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    Object.getPrototypeOf(value) === Object.prototype
+  ) {
+    for (const key of Reflect.ownKeys(value)) {
+      walk((value as Record<PropertyKey, unknown>)[key], fields, others);
+    }
     return;
   }
   others.push(value);
@@ -284,8 +316,9 @@ const toBytes32 = (v: bigint) => v.toString(16).padStart(64, "0");
 /**
  * Everything about a transcript record that an observer WITHOUT the auditor
  * key can measure: which fields exist, of what types, how many field
- * elements they hold, what the non-field values are, the memo's arity, and
- * the length of the record's canonical encoding. Two records that agree here
+ * elements they hold, what the non-field values are, and the memo's arity.
+ * Encoded length is deliberately absent: it is `fieldCount * 64` identically,
+ * so including it would restate a comparison already made. Two records that agree here
  * are indistinguishable on shape -- which is the on-chain half of the
  * uniformity result. What they encode to is deliberately NOT part of this:
  * the values differ, and must, or the records would be literally identical.
@@ -302,7 +335,6 @@ function observableShape(record: SpendPublicInputs) {
     memoKeys: Object.keys(record.memo).sort(),
     c1Keys: Object.keys(record.memo.c1).sort(),
     ctLength: record.memo.ct.length,
-    encodedLength: fields.map(toBytes32).join("").length,
   };
 }
 
@@ -316,21 +348,36 @@ const encodeRecord = (record: SpendPublicInputs) =>
  * artifacts the operator handled directly. Keyed by decimal string, the
  * harness-wide set-key encoding.
  */
+function publishedBySource(): Record<string, Set<string>> {
+  const spendLog = new Set<string>();
+  for (const record of pool.spendLog) {
+    for (const field of partition(record).fields) spendLog.add(field.toString());
+  }
+  const enrollments = new Set<string>();
+  for (const enrollment of [enrollA, enrollB]) {
+    enrollments.add(enrollment.E.toString());
+    enrollments.add(enrollment.cT.toString());
+    enrollments.add(enrollment.dNow.toString());
+  }
+  const deposits = new Set<string>();
+  for (const commit of [depositA1, depositA2, depositB]) {
+    deposits.add(commit.toString());
+  }
+  return {
+    spendLog,
+    rootHistory: new Set(pool.rootHistory),
+    seenNullifiers: new Set(pool.seenNullifiers),
+    seenEnrollments: new Set(pool.seenEnrollments),
+    enrollments,
+    deposits,
+  };
+}
+
+/** The union of every source. Kept derived so a source cannot be dropped here. */
 function published(): Set<string> {
   const values = new Set<string>();
-  for (const record of pool.spendLog) {
-    for (const field of partition(record).fields) values.add(field.toString());
-  }
-  for (const key of pool.rootHistory) values.add(key);
-  for (const key of pool.seenNullifiers) values.add(key);
-  for (const key of pool.seenEnrollments) values.add(key);
-  for (const enrollment of [enrollA, enrollB]) {
-    values.add(enrollment.E.toString());
-    values.add(enrollment.cT.toString());
-    values.add(enrollment.dNow.toString());
-  }
-  for (const commit of [depositA1, depositA2, depositB]) {
-    values.add(commit.toString());
+  for (const source of Object.values(publishedBySource())) {
+    for (const value of source) values.add(value);
   }
   return values;
 }
@@ -354,9 +401,34 @@ function assertNoIdentifiersPublished() {
 
   const values = published();
 
-  // Vacuity guards: the search must actually reach the values it claims to
-  // have searched, INCLUDING the ones nested inside the memo. Without
-  // these, a walk that returned nothing would "prove" perfect privacy.
+  // Vacuity guard, part 1 -- SURFACE. Every source must exist, contribute
+  // something, and be covered by the union. Without this a source could be
+  // dropped from `published()` and the sweep would still pass, because the
+  // remaining sources satisfy the value-level guards below on their own: a
+  // record's own nullifier is in the transcript as well as in the nullifier
+  // set, so no single value can isolate a set. Pinning the source LIST and
+  // each source's coverage is what makes deleting any one of the six go red.
+  const sources = publishedBySource();
+  expect(Object.keys(sources).sort(), "the swept surface itself").toEqual([
+    "deposits",
+    "enrollments",
+    "rootHistory",
+    "seenEnrollments",
+    "seenNullifiers",
+    "spendLog",
+  ]);
+  for (const [name, source] of Object.entries(sources)) {
+    expect(source.size, `source ${name} contributed nothing`).toBeGreaterThan(0);
+    for (const value of source) {
+      expect(values.has(value), `source ${name} is not covered by published()`).toBe(
+        true,
+      );
+    }
+  }
+
+  // Vacuity guard, part 2 -- DEPTH. The search must actually reach the values
+  // it claims to have searched, INCLUDING the ones nested inside the memo.
+  // Without these, a walk that returned nothing would "prove" perfect privacy.
   const witness = pool.spendLog[0];
   expect(values.has(witness.cTallyNew.toString()), "a top-level commitment").toBe(true);
   expect(values.has(witness.memo.c1.x.toString()), "a nested point coordinate").toBe(
@@ -399,7 +471,10 @@ function assertRecordsAreShapeIdentical(below: SpendPublicInputs, above: SpendPu
   // encoding identically -- they are different payments and must differ.
   expect(above).not.toBe(below);
   expect(encodeRecord(above)).not.toBe(encodeRecord(below));
-  expect(encodeRecord(above)).toHaveLength(encodeRecord(below).length);
+  // No length comparison here on purpose: p is 254 bits, so `toBytes32` is 64
+  // characters for EVERY field element and equal encoded length follows
+  // identically from the field counts already compared above. Asserting it
+  // would read as independent evidence while proving nothing.
 
   // The same shape holds across the whole transcript, not just that pair.
   const reference = observableShape(pool.spendLog[0]);
