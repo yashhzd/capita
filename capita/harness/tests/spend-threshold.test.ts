@@ -10,7 +10,7 @@ import {
   personId,
   tallyCommit,
 } from "../src/notes.js";
-import { Pool, type EnrollOutput } from "../src/pool.js";
+import { Pool, type EnrollOutput, type SpendPublicInputs } from "../src/pool.js";
 import { GRUMPKIN_ORDER, isOnCurve } from "../src/grumpkin.js";
 import { decrypt, encrypt, keygen, type Limbs, type Memo } from "../src/elgamal.js";
 import { collect } from "../src/auditor.js";
@@ -24,10 +24,12 @@ import { P, T_THRESHOLD } from "../src/constants.js";
 // execution below CERTIFIES its memo; the decrypt assertions then show
 // what the auditor (and only the auditor) learns from it.
 //
-// Pool acceptance of spend outputs is Task 9; between the two spends of a
-// flow, the new tally and change commitments are inserted into the tree by
-// hand as the acceptance stand-in (executed witnesses stand in for
-// verified proofs per the plan).
+// Every spend below is submitted through `pool.spend` (Task 9's acceptance
+// rules), so the flows run against the real admission path rather than a
+// stand-in: the outputs of the first spend enter the tree exactly as the
+// operator would enter them, and the second spend consumes them from where
+// they actually landed. Per the plan an executed witness still stands in
+// for a verified proof (Task 11).
 //
 // Tests 4 and 5 read `memoLog`, accumulated by tests 1-3 -- vitest runs a
 // file's tests sequentially in declaration order, and this file relies on
@@ -39,7 +41,11 @@ const ENROLLMENT_DIR = fileURLToPath(
 );
 const toHex = (v: bigint) => "0x" + v.toString(16);
 const MASK_128 = (1n << 128n) - 1n;
-const DAY = 20260803n;
+// An opaque period index, not a date -- see Pool.currentDay. The rollover
+// flow below calls advanceDay, so this has to be a plain counter: a
+// YYYYMMDD-shaped fixture would make `DAY + 1n` read as "the next day" and
+// quietly mislead, since 20260831 + 1 is not one.
+const DAY = 800n;
 
 // The auditor keypair: ask stays offline with the auditor; apk is the
 // public input every spend encrypts to.
@@ -83,23 +89,15 @@ interface SpendWitness {
   dNow: bigint;
 }
 
-interface SpendResult {
-  memo: Memo;
-  nPay: bigint;
-  nTally: bigint;
-  cOut1: bigint;
-  cOut2: bigint;
-  cTallyNew: bigint;
-}
-
 // Runs one spend end to end: computes the disclosure message the protocol
 // requires for this witness (TS side), encrypts it to the auditor key, and
 // executes the circuit with the memo as public inputs. Execution only
 // succeeds if the circuit's own threshold branch agrees this is the
-// required memo, so a returned SpendResult certifies its memo. The scalar
+// required memo, so a returned record certifies its memo. The scalar
 // handoff is the Task 5 convention: reduce rEnc mod the Grumpkin group
-// order, split into 128-bit limbs.
-async function spend(w: SpendWitness): Promise<SpendResult> {
+// order, split into 128-bit limbs. The result is shaped as the pool's
+// operator-visible record so it can be submitted to `pool.spend` directly.
+async function spend(w: SpendWitness): Promise<SpendPublicInputs> {
   const sNew = w.dNow === w.dOld ? w.sOld + w.v1 : w.v1;
   const over = sNew > T_THRESHOLD;
   const msg: Limbs = over
@@ -141,7 +139,19 @@ async function spend(w: SpendWitness): Promise<SpendResult> {
     returnValue as [string, string, string, string, string]
   ).map(BigInt);
   memoLog.push({ kind: over ? "real" : "dummy", memo });
-  return { memo, nPay, nTally, cOut1, cOut2, cTallyNew };
+  return {
+    root: w.root,
+    dNow: w.dNow,
+    tThreshold: T_THRESHOLD,
+    apkX: APK.x,
+    apkY: APK.y,
+    memo,
+    nPay,
+    nTally,
+    cOut1,
+    cOut2,
+    cTallyNew,
+  };
 }
 
 // Enroll + deposit: genesis tally at leaf 0 (subtotal 0, day dNow),
@@ -153,18 +163,10 @@ async function setupPool(
   ownerSk: bigint,
   dNow: bigint,
 ): Promise<{ pool: Pool; cIn: bigint; depositIndex: number }> {
-  const pool = new Pool(dNow);
+  const pool = new Pool(dNow, APK);
   await pool.enroll(await runEnrollment(personSecret, rT, dNow));
   const { commit: cIn, index } = await pool.deposit(20000n, await ownerPk(ownerSk));
   return { pool, cIn, depositIndex: index };
-}
-
-// Task 9 acceptance stand-in: admit a spend's new tally and change notes
-// into the tree so the next spend can consume them.
-async function admitOutputs(pool: Pool, cTallyNew: bigint, cChange: bigint) {
-  await pool.tree.insert(cTallyNew);
-  await pool.tree.insert(cChange);
-  pool.rootHistory.add(pool.tree.root().toString());
 }
 
 beforeAll(() => {
@@ -184,7 +186,7 @@ test(
     const aliceSk = 1111n;
     const { pool, depositIndex } = await setupPool(personSecret, 41n, aliceSk, DAY);
 
-    const { memo, cTallyNew } = await spend({
+    const sp = await spend({
       personSecret,
       vIn: 20000n,
       ownerSk: aliceSk,
@@ -204,13 +206,18 @@ test(
       root: pool.tree.root(),
       dNow: DAY,
     });
+    await pool.spend(sp);
 
     // 6000 <= 10000: nothing to disclose. The circuit certified this memo,
     // and to the auditor it reads as the all-zero dummy.
-    expect(await decrypt(memo, ASK)).toEqual([0n, 0n, 0n, 0n]);
+    expect(await decrypt(sp.memo, ASK)).toEqual([0n, 0n, 0n, 0n]);
     // The tally still advanced under the dummy memo.
     const pid = await personId(personSecret);
-    expect(cTallyNew).toBe(await tallyCommit(pid, 6000n, DAY, 403n));
+    expect(sp.cTallyNew).toBe(await tallyCommit(pid, 6000n, DAY, 403n));
+    // ...and the pool accepted it: three output leaves on top of the
+    // genesis tally and the deposit.
+    expect(pool.tree.leafCount()).toBe(5);
+    expect(pool.spendLog).toHaveLength(1);
   },
 );
 
@@ -247,10 +254,11 @@ test(
     });
     expect(await decrypt(first.memo, ASK)).toEqual([0n, 0n, 0n, 0n]);
 
-    // Admit the updated tally (leaf 2) and the change note (leaf 3), then
-    // spend 5000 out of the change on the same day: subtotal 6000 -> 11000,
-    // over the threshold.
-    await admitOutputs(pool, first.cTallyNew, first.cOut2);
+    // The pool admits the spend's three outputs as one contiguous block --
+    // c_out1 at leaf 2, the change at leaf 3, the updated tally at leaf 4 --
+    // then spend 5000 out of the change on the same day: subtotal
+    // 6000 -> 11000, over the threshold.
+    await pool.spend(first);
     const second = await spend({
       personSecret,
       vIn: 14000n,
@@ -265,7 +273,7 @@ test(
       sOld: 6000n,
       dOld: DAY,
       rT: 413n,
-      pathT: pool.tree.path(2),
+      pathT: pool.tree.path(4),
       rTNew: 416n,
       // A scalar above 2^128 exercises the nonzero-hi-limb handoff through
       // the spend ABI (the consistency gate covers it for the library).
@@ -278,6 +286,12 @@ test(
     // crossing the threshold, and the day itself.
     expect(await decrypt(second.memo, ASK)).toEqual([1n, pid, 11000n, DAY]);
     expect(second.cTallyNew).toBe(await tallyCommit(pid, 11000n, DAY, 416n));
+
+    // The crossing spend settles like any other -- the pool applies the
+    // same rules to it, and the transcript holds both spends.
+    await pool.spend(second);
+    expect(pool.tree.leafCount()).toBe(8);
+    expect(pool.spendLog).toHaveLength(2);
   },
 );
 
@@ -312,10 +326,15 @@ test(
       dNow: DAY,
     });
     expect(await decrypt(first.memo, ASK)).toEqual([0n, 0n, 0n, 0n]);
+    await pool.spend(first);
 
     // Next day: the tally consumed still says day d, but d_now = d + 1, so
-    // the subtotal restarts at v1 = 5000 instead of reaching 11000.
-    await admitOutputs(pool, first.cTallyNew, first.cOut2);
+    // the subtotal restarts at v1 = 5000 instead of reaching 11000. The
+    // pool's own clock has to move too -- it pins d_now, so a spend dated
+    // the next period is only admissible once the rollover has happened
+    // (dating one early is the evasion pool-rules.test.ts pins).
+    await pool.advanceDay();
+    expect(pool.currentDay).toBe(DAY + 1n);
     const second = await spend({
       personSecret,
       vIn: 14000n,
@@ -330,7 +349,7 @@ test(
       sOld: 6000n,
       dOld: DAY,
       rT: 423n,
-      pathT: pool.tree.path(2),
+      pathT: pool.tree.path(4),
       rTNew: 426n,
       rEnc: 3002n,
       root: pool.tree.root(),
@@ -340,6 +359,12 @@ test(
     expect(await decrypt(second.memo, ASK)).toEqual([0n, 0n, 0n, 0n]);
     // The new tally binds the RESET subtotal on the new day.
     expect(second.cTallyNew).toBe(await tallyCommit(pid, 5000n, DAY + 1n, 426n));
+
+    // And the pool accepts it on the new period, so the reset is a settled
+    // fact rather than only a satisfiable witness.
+    await pool.spend(second);
+    expect(pool.tree.leafCount()).toBe(8);
+    expect(pool.spendLog).toHaveLength(2);
   },
 );
 
