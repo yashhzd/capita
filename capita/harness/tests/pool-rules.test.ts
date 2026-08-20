@@ -5,7 +5,7 @@ import { closePoseidon } from "../src/poseidon.js";
 import { MerkleTree, type Path } from "../src/merkle.js";
 import { noteNullifier, ownerPk, paymentCommit, personId, tallyCommit } from "../src/notes.js";
 import { Pool, type EnrollOutput, type SpendPublicInputs } from "../src/pool.js";
-import { MERKLE_DEPTH, P, T_THRESHOLD } from "../src/constants.js";
+import { DAY_BITS, MERKLE_DEPTH, P, T_THRESHOLD } from "../src/constants.js";
 import { GRUMPKIN_ORDER, INF, negate, type Pt } from "../src/grumpkin.js";
 import { decrypt, encrypt, keygen, type Limbs, type Memo } from "../src/elgamal.js";
 import { collect } from "../src/auditor.js";
@@ -1061,7 +1061,7 @@ test(
 
     await pool.spend(sp);
     const owed = [{ personId: pid, subtotal: 15000n, day: DAY }];
-    expect(await collect(pool.spendLog.map((r) => r.memo), ASK)).toEqual(owed);
+    expect((await collect(pool.spendLog.map((r) => r.memo), ASK)).disclosures).toEqual(owed);
 
     // The payer still holds their submission. Everything they can reach
     // must be a different object from what the pool kept.
@@ -1082,7 +1082,7 @@ test(
     // The transcript is unmoved and the disclosure still stands.
     expect(pool.spendLog[0].dNow).toBe(DAY);
     expect(pool.spendLog[0].tThreshold).toBe(T_THRESHOLD);
-    expect(await collect(pool.spendLog.map((r) => r.memo), ASK)).toEqual(owed);
+    expect((await collect(pool.spendLog.map((r) => r.memo), ASK)).disclosures).toEqual(owed);
   },
 );
 
@@ -1090,11 +1090,14 @@ test(
   "a structurally invalid memo is rejected on acceptance",
   { timeout: 120_000 },
   async () => {
-    // The pool stores memos it never inspected, and one malformed record
-    // poisons the auditor's whole collection run: an infinite c1 makes
-    // decrypt throw, taking down every honest disclosure in the batch. An
-    // off-curve or non-canonical c1 is worse than useless -- it decrypts to
-    // nothing recoverable while looking like a settled disclosure.
+    // The pool stores memos it never inspected. The shapes below fail in
+    // three different ways, and only two of them are breakages: an infinite
+    // c1 makes decrypt throw, taking down every honest disclosure in the
+    // batch; an off-curve c1 decrypts to garbage, so a disclosure that was
+    // owed is lost; a non-canonical c1 decrypts CORRECTLY (verified) and is
+    // rejected as hygiene, because grumpkin's add compares x with raw
+    // bigint equality and states normalization as a precondition -- the
+    // collision merely happens not to arise inside mul(ask, c1).
     //
     // Task 11 does NOT cover this. The circuit ABI carries c1 as
     // [Field; 2], but the harness Pt carries a third field, `inf`, with no
@@ -1156,6 +1159,121 @@ test(
   },
 );
 
+test(
+  "a memo the pool did not validate is never the memo it stores",
+  { timeout: 120_000 },
+  async () => {
+    // The structural defect: validating `pub.memo` while STORING a
+    // reconstruction means the thing checked is not the thing kept, and
+    // anything that differs between the two reads slips through. Both
+    // witnesses below are that one defect, so both are fixed by taking the
+    // snapshot FIRST and validating THAT.
+    //
+    // Task 11 would kill both witnesses by binding ct as [Field; 4] and c1
+    // as [Field; 2], but it would NOT repair validate-A-store-B, and the
+    // defect outlives any particular witness.
+    const personSecret = 9121n;
+    const rT = 101n;
+    const aliceSk = 1131n;
+    const pid = await personId(personSecret);
+    const owed = [{ personId: pid, subtotal: 15000n, day: DAY }];
+
+    const crossing = async (pool: Pool, depositIndex: number, rEnc: bigint) =>
+      runSpend({
+        personSecret,
+        vIn: 20000n,
+        ownerSk: aliceSk,
+        rIn: BigInt(depositIndex),
+        pathIn: pool.tree.path(depositIndex),
+        v1: 15000n,
+        pk1: await ownerPk(2222n),
+        r1: 1011n,
+        v2: 5000n,
+        r2: 1012n,
+        sOld: 0n,
+        dOld: DAY,
+        rT,
+        pathT: pool.tree.path(0),
+        rTNew: 1013n,
+        rEnc,
+        root: pool.tree.root(),
+        dNow: DAY,
+      });
+
+    // WITNESS 1 -- arity. `Array.prototype.every` is vacuous past the end
+    // of a short array, so a three-limb ct passes a per-limb predicate. A
+    // snapshot that hard-codes four slots then stores [a, b, c, undefined],
+    // which fails that same predicate -- and collect drops it in silence.
+    // A payer who owes a disclosure would file none, and settle anyway.
+    const a = await setupPool(personSecret, rT, aliceSk);
+    const short = await crossing(a.pool, a.depositIndex, 10101n);
+    expect(await decrypt(short.memo, ASK)).toEqual([1n, pid, 15000n, DAY]);
+    const threeLimb = {
+      c1: short.memo.c1,
+      ct: [short.memo.ct[0], short.memo.ct[1], short.memo.ct[2]] as unknown as Limbs,
+    };
+
+    await expect(a.pool.spend({ ...short, memo: threeLimb })).rejects.toThrow(
+      "invalid-memo",
+    );
+
+    // The over-length case is the same defect from the other side, and it
+    // is the one a per-slot copy cannot catch: four hard-coded slots read
+    // a five-limb ct as a well-formed four-limb one and store the
+    // truncation, whereas a faithful copy preserves the arity for the
+    // length check to reject. A memo whose arity is not four is not a memo.
+    const fiveLimb = [...short.memo.ct, 7n] as unknown as Limbs;
+    await expect(
+      a.pool.spend({ ...short, memo: { c1: short.memo.c1, ct: fiveLimb } }),
+    ).rejects.toThrow("invalid-memo");
+
+    expect(a.pool.seenNullifiers.size).toBe(0);
+    expect(a.pool.tree.leafCount()).toBe(2);
+    expect(a.pool.spendLog).toHaveLength(0);
+
+    // WITNESS 2 -- a second read that differs from the first. Whatever the
+    // pool decides, the record it keeps must be the record it checked, so
+    // the disclosure survives.
+    const b = await setupPool(personSecret, rT, aliceSk);
+    const real = await crossing(b.pool, b.depositIndex, 10102n);
+    let reads = 0;
+    const twoFaced: Memo = {
+      get c1() {
+        reads += 1;
+        return reads === 1 ? real.memo.c1 : INF;
+      },
+      ct: real.memo.ct,
+    };
+
+    await b.pool.spend({ ...real, memo: twoFaced });
+    expect(reads, "vacuity guard: the pool did read c1").toBeGreaterThan(0);
+    expect(b.pool.spendLog).toHaveLength(1);
+    expect(b.pool.spendLog[0].memo.c1.inf).toBe(false);
+    expect((await collect(b.pool.spendLog.map((r) => r.memo), ASK)).disclosures).toEqual(
+      owed,
+    );
+  },
+);
+
+test("the pool clock stays inside the circuit's 32-bit day range", async () => {
+  // The spend circuit range-bounds both days to 32 bits (main.nr), so a
+  // period index outside [0, 2^32) is one no spend can ever be proved
+  // against: a pool whose clock reached the ceiling would accept nothing,
+  // forever. Unreachable in practice at ~11.7M business days, but the
+  // clock is exactly what the day rule pins, so the bound is explicit.
+  const limit = 1n << BigInt(DAY_BITS);
+
+  expect(() => new Pool(limit, APK)).toThrow(RangeError);
+  expect(() => new Pool(-1n, APK)).toThrow(RangeError);
+  expect(() => new Pool(limit - 1n, APK)).not.toThrow();
+
+  const pool = new Pool(limit - 1n, APK);
+  await expect(pool.advanceDay()).rejects.toThrow(RangeError);
+  expect(pool.currentDay, "a refused rollover leaves the clock where it was").toBe(
+    limit - 1n,
+  );
+});
+
 test("collect survives a record it cannot decrypt", async () => {
   // Defence in depth for the auditor, who may read memos that never came
   // from this pool. A structurally invalid record carries no recoverable
@@ -1165,13 +1283,22 @@ test("collect survives a record it cannot decrypt", async () => {
   const real = await encrypt([1n, pid, 15000n, DAY], APK, 1234n);
   const poisoned: Memo = { c1: INF, ct: [0n, 0n, 0n, 0n] };
 
-  expect(await collect([real, poisoned], ASK)).toEqual([
-    { personId: pid, subtotal: 15000n, day: DAY },
-  ]);
+  const owed = [{ personId: pid, subtotal: 15000n, day: DAY }];
+  const first = await collect([real, poisoned], ASK);
+  expect(first.disclosures).toEqual(owed);
+  // The skip must not be silent. Dropping the record loses no plaintext,
+  // but it does hide the FACT that a malformed record was there, and after
+  // the pool stopped admitting them that fact is the only signal anything
+  // is wrong -- so collect names the records it could not read.
+  expect(first.skipped).toEqual([1]);
+
   // Order must not matter: the bad record cannot shadow a later good one.
-  expect(await collect([poisoned, real], ASK)).toEqual([
-    { personId: pid, subtotal: 15000n, day: DAY },
-  ]);
+  const second = await collect([poisoned, real], ASK);
+  expect(second.disclosures).toEqual(owed);
+  expect(second.skipped).toEqual([0]);
+
+  // A clean batch reports no skips at all.
+  expect((await collect([real], ASK)).skipped).toEqual([]);
 });
 
 test(

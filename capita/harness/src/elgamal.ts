@@ -48,7 +48,12 @@ export function isWellFormedMemo(memo: Memo): boolean {
   if (c1.inf || !inField(c1.x) || !inField(c1.y) || !isOnCurve(c1)) {
     return false;
   }
-  return ct.every(inField);
+  // Arity is checked explicitly, and the length comparison is NOT vacuous
+  // just because `Limbs` is a four-tuple: at this boundary the type is a
+  // claim about unverified input, not a fact. `Array.prototype.every`
+  // returns true for indices past the end of a short array, so a three-limb
+  // ct would otherwise satisfy the per-limb test below.
+  return ct.length === 4 && ct.every(inField);
 }
 
 // pad_i = p2([S.x, S.y, i]). Coordinates are < P by construction and i is

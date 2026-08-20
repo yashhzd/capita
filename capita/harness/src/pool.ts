@@ -1,5 +1,5 @@
-import { MERKLE_DEPTH, P, T_THRESHOLD } from "./constants.js";
-import { isWellFormedMemo, type Memo } from "./elgamal.js";
+import { DAY_BITS, MERKLE_DEPTH, P, T_THRESHOLD } from "./constants.js";
+import { isWellFormedMemo, type Limbs, type Memo } from "./elgamal.js";
 import { type Pt } from "./grumpkin.js";
 import { MerkleTree } from "./merkle.js";
 import { paymentCommit } from "./notes.js";
@@ -48,6 +48,15 @@ export interface EnrollOutput {
  * real one. Each declared input is therefore a complete bypass of some
  * protocol property until `Pool.spend` pins it to pool state.
  */
+/**
+ * One past the largest usable period index: the spend circuit range-bounds
+ * both days to DAY_BITS, so a pool clock at or above this could never be
+ * matched by any provable `d_now`, and the pool would accept nothing ever
+ * again. Roughly 11.7 million business days away, but the clock is the one
+ * thing the day rule pins, so the ceiling is enforced rather than assumed.
+ */
+const PERIOD_LIMIT = 1n << BigInt(DAY_BITS);
+
 export interface SpendPublicInputs {
   /** Tree root the membership proofs were made against. */
   root: bigint;
@@ -128,6 +137,11 @@ export class Pool {
   private opQueue: Promise<unknown> = Promise.resolve();
 
   constructor(currentDay: bigint = 0n, auditorKey: Pt | null = null) {
+    if (currentDay < 0n || currentDay >= PERIOD_LIMIT) {
+      throw new RangeError(
+        `currentDay outside the circuit's ${DAY_BITS}-bit day range: ${currentDay}`,
+      );
+    }
     this.day = currentDay;
     this.auditorKey = auditorKey;
   }
@@ -274,13 +288,19 @@ export class Pool {
    *   one else can produce a leaf carrying their `person_id` -- but the pool
    *   should not knowingly store a dead note.
    * - The rule is deliberately confined to the tally. Payment outputs are
-   *   NOT deduplicated, because a duplicate payment leaf is harmless: it
-   *   shares the original's nullifier, so it can still be spent only once,
-   *   and it cannot mint value because it came out of a value-conserving
-   *   circuit. The only way to produce one is to reuse your own salt, which
-   *   costs you a note and costs nobody else anything, so deduplicating
-   *   payment outputs would be a usability guard rather than a security
-   *   control. Note that the reach of an attacker does not enter into it:
+   *   NOT deduplicated. A duplicate payment leaf cannot mint: both copies
+   *   came out of a value-conserving circuit and share one nullifier, so
+   *   the effect is destruction, never inflation. It is not costless to
+   *   everyone, though, and the party who bears it is not the one who
+   *   caused it -- `pk1` is the RECIPIENT's key, so the duplicate note is
+   *   theirs, and a single nullifier covering both leaves them able to
+   *   realise only one of two settled-looking payments. It is nonetheless
+   *   the recipient's check to make rather than the pool's: a note is
+   *   identified by its commitment, so a wallet that has already seen this
+   *   commitment must reject the second copy, exactly as it must reject any
+   *   replayed bearer note. Pool-side dedup would duplicate that check
+   *   rather than replace it. Note that the reach of an attacker does not
+   *   enter into it either way:
    *   no insertion path lets any actor place a CHOSEN field element in the
    *   tree -- `enroll` inserts a circuit-output `C_t`, `deposit` inserts a
    *   commitment whose salt the pool fixes to the leaf index, and `spend`
@@ -289,13 +309,23 @@ export class Pool {
    *   inverting it.
    * - The memo is checked for structure, not content: the circuit already
    *   proved it encrypts the required message, but nothing there constrains
-   *   the SHAPE the operator receives. A memo whose `c1` is the identity
-   *   makes the auditor's `decrypt` throw, and one bad record would take
-   *   down the honest disclosures batched with it; an off-curve or
-   *   non-canonical `c1` yields nothing recoverable while still looking
-   *   settled. Task 11 does not subsume this: the ABI carries `c1` as
-   *   `[Field; 2]`, while the harness point carries a third field, `inf`,
-   *   with no ABI counterpart to bind.
+   *   the SHAPE the operator receives. The rejected shapes fail in three
+   *   different ways and it is worth being exact about which, because only
+   *   two of them are breakages. A `c1` at infinity makes the auditor's
+   *   `decrypt` throw, so one such record costs the honest disclosures
+   *   batched with it. An off-curve `c1` decrypts to garbage, so a
+   *   disclosure that was owed is simply lost. A non-canonical `c1` -- a
+   *   coordinate outside [0, P) -- in fact decrypts CORRECTLY (verified),
+   *   so it is rejected as hygiene, not as a demonstrated break: grumpkin's
+   *   `add` compares x with raw bigint equality and does throw on two
+   *   congruent-but-differently-represented points, a precondition that
+   *   module states explicitly, and the collision merely happens not to
+   *   arise inside `mul(ask, c1)`. Rejecting it keeps stored records
+   *   canonical and keeps the pool off a dependency on that accident.
+   *   Task 11 does not subsume any of this: the ABI carries `c1` as
+   *   `[Field; 2]` and `ct` as `[Field; 4]`, while the harness point
+   *   carries a third field, `inf`, with no ABI counterpart to bind -- and
+   *   no proof binding repairs checking one object while storing another.
    *
    * Validation runs to completion before any state changes -- including the
    * range and capacity checks that `tree.insert` would otherwise raise
@@ -310,34 +340,72 @@ export class Pool {
    */
   async spend(pub: SpendPublicInputs): Promise<void> {
     return this.serialize(async () => {
+      // STEP 0, before any rule runs: take the snapshot. Every check below
+      // reads THIS object, and this is the object stored, so the thing
+      // validated is always the thing kept.
+      //
+      // Checking the caller's object and storing a reconstruction of it is
+      // not equivalent, and the gap is exploitable: anything that differs
+      // between the two reads passes the check and lands in the transcript
+      // unchecked. A `memo.c1` getter yielding a real point first and the
+      // identity second, or a ct whose true arity differs from the four
+      // slots a reconstruction assumes, both void a disclosure that way.
+      // Snapshotting first collapses that whole class -- the defect
+      // outlives any individual witness, so the ordering is the fix.
+      //
+      // `pub` is untrusted external input: read each field exactly once,
+      // here, and never again.
+      const c1 = pub.memo.c1;
+      const record: SpendPublicInputs = {
+        root: pub.root,
+        dNow: pub.dNow,
+        tThreshold: pub.tThreshold,
+        apkX: pub.apkX,
+        apkY: pub.apkY,
+        memo: {
+          c1: { x: c1.x, y: c1.y, inf: c1.inf },
+          // Spread rather than four hard-coded slots: a copy that assumes
+          // the arity would manufacture `undefined` limbs out of a short
+          // ct instead of preserving it for `isWellFormedMemo` to reject.
+          ct: [...pub.memo.ct] as Limbs,
+        },
+        nPay: pub.nPay,
+        nTally: pub.nTally,
+        cOut1: pub.cOut1,
+        cOut2: pub.cOut2,
+        cTallyNew: pub.cTallyNew,
+      };
+
       if (this.auditorKey === null) {
         throw new Error("no-auditor-key");
       }
-      if (!this.rootHistory.has(pub.root.toString())) {
+      if (!this.rootHistory.has(record.root.toString())) {
         throw new Error("unknown-root");
       }
-      if (pub.dNow !== this.currentDay) {
+      // `dNow` inherits the circuit's 32-bit day bound from this equality:
+      // the clock is bounded at construction and by `advanceDay`.
+      if (record.dNow !== this.currentDay) {
         throw new Error("wrong-day");
       }
-      if (pub.tThreshold !== T_THRESHOLD) {
+      if (record.tThreshold !== T_THRESHOLD) {
         throw new Error("wrong-threshold");
       }
-      if (pub.apkX !== this.auditorKey.x || pub.apkY !== this.auditorKey.y) {
+      if (record.apkX !== this.auditorKey.x || record.apkY !== this.auditorKey.y) {
         throw new Error("wrong-auditor-key");
       }
-      if (!isWellFormedMemo(pub.memo)) {
+      if (!isWellFormedMemo(record.memo)) {
         throw new Error("invalid-memo");
       }
-      const nPay = pub.nPay.toString();
-      const nTally = pub.nTally.toString();
+      const nPay = record.nPay.toString();
+      const nTally = record.nTally.toString();
       if (this.seenNullifiers.has(nPay) || this.seenNullifiers.has(nTally)) {
         throw new Error("double-spend");
       }
-      if (this.tree.hasLeaf(pub.cTallyNew)) {
+      if (this.tree.hasLeaf(record.cTallyNew)) {
         throw new Error("duplicate-tally");
       }
 
-      const outputs = [pub.cOut1, pub.cOut2, pub.cTallyNew];
+      const outputs = [record.cOut1, record.cOut2, record.cTallyNew];
       for (const commit of outputs) {
         if (commit < 0n || commit >= P) {
           throw new RangeError(`spend output out of field range [0, P): ${commit}`);
@@ -357,20 +425,13 @@ export class Pool {
         await this.tree.insert(commit);
       }
       this.rootHistory.add(this.tree.root().toString());
-      // A SNAPSHOT, not the caller's object. The transcript is the
-      // auditor's evidence base, so it must not alias something the payer
-      // still holds a reference to: storing `pub` directly let a payer
+      // The validated snapshot, which shares no object with the caller.
+      // The transcript is the auditor's evidence base, so it must not alias
+      // something the payer still holds: storing `pub` directly let a payer
       // settle a crossing spend, be collected correctly, and then blank the
       // memo they had submitted -- voiding their own disclosure after the
-      // fact. Only `memo` needs deep handling; every other field is a
-      // bigint, copied by value.
-      this.spendLog.push({
-        ...pub,
-        memo: {
-          c1: { ...pub.memo.c1 },
-          ct: [pub.memo.ct[0], pub.memo.ct[1], pub.memo.ct[2], pub.memo.ct[3]],
-        },
-      });
+      // fact.
+      this.spendLog.push(record);
     });
   }
 
@@ -388,6 +449,11 @@ export class Pool {
    */
   async advanceDay(): Promise<void> {
     return this.serialize(async () => {
+      if (this.day + 1n >= PERIOD_LIMIT) {
+        throw new RangeError(
+          `pool clock exhausted: no period after ${this.day} fits the circuit's ${DAY_BITS}-bit day range`,
+        );
+      }
       this.day += 1n;
     });
   }

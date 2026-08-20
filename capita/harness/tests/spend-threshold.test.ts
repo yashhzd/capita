@@ -354,10 +354,11 @@ test("auditor.collect returns exactly the one real disclosure", async () => {
   ).toHaveLength(5);
   expect(memoLog.filter((m) => m.kind === "real")).toHaveLength(1);
 
-  const disclosures = await collect(
+  const { disclosures, skipped } = await collect(
     memoLog.map((m) => m.memo),
     ASK,
   );
+  expect(skipped, "every memo here is a real circuit-certified ciphertext").toEqual([]);
   expect(disclosures).toEqual([
     { personId: await personId(4201n), subtotal: 11000n, day: DAY },
   ]);
