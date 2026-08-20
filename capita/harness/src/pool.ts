@@ -1,5 +1,5 @@
 import { DAY_BITS, MERKLE_DEPTH, P, T_THRESHOLD } from "./constants.js";
-import { isWellFormedMemo, type Limbs, type Memo } from "./elgamal.js";
+import { isWellFormedMemo, type Memo } from "./elgamal.js";
 import { type Pt } from "./grumpkin.js";
 import { MerkleTree } from "./merkle.js";
 import { paymentCommit } from "./notes.js";
@@ -36,6 +36,121 @@ export interface EnrollOutput {
 }
 
 /**
+ * One past the largest usable period index: the spend circuit range-bounds
+ * both days to DAY_BITS, so a pool clock at or above this could never be
+ * matched by any provable `d_now`, and the pool would accept nothing ever
+ * again. Roughly 11.7 million business days away, but the clock is the one
+ * thing the day rule pins, so the ceiling is enforced rather than assumed.
+ */
+const PERIOD_LIMIT = 1n << BigInt(DAY_BITS);
+
+const describe = (v: unknown): string => (v === null ? "null" : typeof v);
+
+/**
+ * Reads one scalar out of an untrusted submission, refusing anything that
+ * is not GENUINELY a bigint, and returning the value it just checked.
+ *
+ * Returning the checked value is the point, not a convenience: the caller
+ * stores what this returned, so there is no window between the check and
+ * the capture for the value to change, and no path by which the stored
+ * record keeps hold of something the submitter can still edit.
+ *
+ * The type test does work no value test can. JavaScript coerces in
+ * comparisons, so a range check alone accepts a number, a decimal string,
+ * or an object with a `valueOf` in range -- and each of those breaks
+ * something downstream that a range check cannot see: numbers cannot
+ * represent a field element without losing precision, `toString` on a
+ * hand-written object need not agree with `valueOf` (which decides what a
+ * nullifier-set key actually burns), and an object stays live in the
+ * transcript for its submitter to mutate afterwards.
+ *
+ * Coercing here instead of refusing would be wrong: a field element that
+ * arrived as a JS number has ALREADY lost precision, and converting it
+ * would launder that loss into the pool. Decoding a wire format is the
+ * transport's job, and its output must be bigints.
+ */
+function field(value: unknown, name: string): bigint {
+  if (typeof value !== "bigint") {
+    throw new Error(
+      `malformed-record: ${name} is ${describe(value)}, expected a bigint`,
+    );
+  }
+  return value;
+}
+
+/** As `field`, for the one boolean in the record. */
+function flag(value: unknown, name: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(
+      `malformed-record: ${name} is ${describe(value)}, expected a boolean`,
+    );
+  }
+  return value;
+}
+
+/**
+ * Builds the operator's own copy of a submission, reading every field of
+ * `pub` exactly once and admitting only well-typed values.
+ *
+ * Total by construction: every way a submission can be malformed leaves
+ * here as `"malformed-record"`, so no shape of input escapes the
+ * documented error contract as a raw TypeError.
+ *
+ * `memo.ct`'s length is checked BEFORE its four limbs are read, which is
+ * what makes reading them by index safe -- reading fixed slots out of an
+ * unchecked array is how a three-limb ct became a four-limb one with an
+ * undefined tail, and how a five-limb one was silently truncated.
+ */
+function snapshot(pub: SpendPublicInputs): SpendPublicInputs {
+  const memo: unknown = pub.memo;
+  if (memo === null || typeof memo !== "object") {
+    throw new Error(
+      `malformed-record: memo is ${describe(memo)}, expected an object`,
+    );
+  }
+  const { c1, ct } = memo as { c1: unknown; ct: unknown };
+  if (c1 === null || typeof c1 !== "object") {
+    throw new Error(
+      `malformed-record: memo.c1 is ${describe(c1)}, expected an object`,
+    );
+  }
+  if (!Array.isArray(ct)) {
+    throw new Error(
+      `malformed-record: memo.ct is ${describe(ct)}, expected an array`,
+    );
+  }
+  if (ct.length !== 4) {
+    throw new Error(`malformed-record: memo.ct has ${ct.length} limbs, expected 4`);
+  }
+  const point = c1 as { x: unknown; y: unknown; inf: unknown };
+  return {
+    root: field(pub.root, "root"),
+    dNow: field(pub.dNow, "dNow"),
+    tThreshold: field(pub.tThreshold, "tThreshold"),
+    apkX: field(pub.apkX, "apkX"),
+    apkY: field(pub.apkY, "apkY"),
+    memo: {
+      c1: {
+        x: field(point.x, "memo.c1.x"),
+        y: field(point.y, "memo.c1.y"),
+        inf: flag(point.inf, "memo.c1.inf"),
+      },
+      ct: [
+        field(ct[0], "memo.ct[0]"),
+        field(ct[1], "memo.ct[1]"),
+        field(ct[2], "memo.ct[2]"),
+        field(ct[3], "memo.ct[3]"),
+      ],
+    },
+    nPay: field(pub.nPay, "nPay"),
+    nTally: field(pub.nTally, "nTally"),
+    cOut1: field(pub.cOut1, "cOut1"),
+    cOut2: field(pub.cOut2, "cOut2"),
+    cTallyNew: field(pub.cTallyNew, "cTallyNew"),
+  };
+}
+
+/**
  * The operator-visible record of one spend, in the spend circuit's own ABI
  * order (`circuits/spend/src/main.nr`): first the public inputs the prover
  * chose, then the five public outputs the circuit returned.
@@ -48,15 +163,6 @@ export interface EnrollOutput {
  * real one. Each declared input is therefore a complete bypass of some
  * protocol property until `Pool.spend` pins it to pool state.
  */
-/**
- * One past the largest usable period index: the spend circuit range-bounds
- * both days to DAY_BITS, so a pool clock at or above this could never be
- * matched by any provable `d_now`, and the pool would accept nothing ever
- * again. Roughly 11.7 million business days away, but the clock is the one
- * thing the day rule pins, so the ceiling is enforced rather than assumed.
- */
-const PERIOD_LIMIT = 1n << BigInt(DAY_BITS);
-
 export interface SpendPublicInputs {
   /** Tree root the membership proofs were made against. */
   root: bigint;
@@ -252,19 +358,20 @@ export class Pool {
    * prover's declared public inputs in order:
    *
    *  0. an auditor key is configured at all -- `"no-auditor-key"`
-   *  1. `root` is a root the tree really had -- `"unknown-root"`
-   *  2. `dNow` is today -- `"wrong-day"`
-   *  3. `tThreshold` is the policy constant -- `"wrong-threshold"`
-   *  4. `(apkX, apkY)` is the configured auditor key -- `"wrong-auditor-key"`
-   *  5. the memo is a decryptable ciphertext -- `"invalid-memo"`
-   *  6. neither nullifier is already burnt -- `"double-spend"`
-   *  7. the new tally is not already a leaf -- `"duplicate-tally"`
+   *  1. the submission is a well-typed record -- `"malformed-record"`
+   *  2. `root` is a root the tree really had -- `"unknown-root"`
+   *  3. `dNow` is today -- `"wrong-day"`
+   *  4. `tThreshold` is the policy constant -- `"wrong-threshold"`
+   *  5. `(apkX, apkY)` is the configured auditor key -- `"wrong-auditor-key"`
+   *  6. the memo is a decryptable ciphertext -- `"invalid-memo"`
+   *  7. neither nullifier is already burnt -- `"double-spend"`
+   *  8. the new tally is not already a leaf -- `"duplicate-tally"`
    *
    * then admits: burns both nullifiers, inserts `cOut1`, `cOut2`,
    * `cTallyNew` in that order, records the new root, and appends the record
    * to the public transcript.
    *
-   * Rules 1-2 and 5 are the plan's; the rest close bypasses that adversarial
+   * Rules 2-3 and 7 are the plan's; the rest close bypasses that adversarial
    * review demonstrated against the circuit alone, and each is load-bearing:
    *
    * - `dNow` is the big one. The circuit only checks `d_now >= d_old`, so a
@@ -298,9 +405,12 @@ export class Pool {
    *   the recipient's check to make rather than the pool's: a note is
    *   identified by its commitment, so a wallet that has already seen this
    *   commitment must reject the second copy, exactly as it must reject any
-   *   replayed bearer note. Pool-side dedup would duplicate that check
-   *   rather than replace it. Note that the reach of an attacker does not
-   *   enter into it either way:
+   *   replayed bearer note. Whether a pool-side rule would make that wallet
+   *   check redundant depends on whether the pool is the wallet's only
+   *   source of notes, so the argument for leaving it out is not that the
+   *   check would be duplicated -- it is that a wallet must not depend on
+   *   the operator's policy for a property it can establish itself. Note
+   *   that the reach of an attacker does not enter into it either way:
    *   no insertion path lets any actor place a CHOSEN field element in the
    *   tree -- `enroll` inserts a circuit-output `C_t`, `deposit` inserts a
    *   commitment whose salt the pool fixes to the leaf index, and `spend`
@@ -336,49 +446,39 @@ export class Pool {
    * inside the tree fails closed (notes destroyed) rather than open (notes
    * spendable twice).
    *
+   * Rule 1 is what keeps that list complete: without it a submission whose
+   * shape is wrong fails on a raw TypeError somewhere inside the checks,
+   * outside the contract entirely. Its message carries the offending field
+   * after the `"malformed-record"` prefix.
+   *
    * Throws the strings above, or a RangeError for a non-canonical output.
    */
   async spend(pub: SpendPublicInputs): Promise<void> {
     return this.serialize(async () => {
-      // STEP 0, before any rule runs: take the snapshot. Every check below
-      // reads THIS object, and this is the object stored, so the thing
-      // validated is always the thing kept.
+      if (this.auditorKey === null) {
+        throw new Error("no-auditor-key");
+      }
+
+      // Before any rule that reads the submission: take the operator's own
+      // copy. Every check below reads THIS object, and this is the object
+      // stored, so the thing validated is always the thing kept.
       //
       // Checking the caller's object and storing a reconstruction of it is
       // not equivalent, and the gap is exploitable: anything that differs
       // between the two reads passes the check and lands in the transcript
       // unchecked. A `memo.c1` getter yielding a real point first and the
-      // identity second, or a ct whose true arity differs from the four
-      // slots a reconstruction assumes, both void a disclosure that way.
-      // Snapshotting first collapses that whole class -- the defect
-      // outlives any individual witness, so the ordering is the fix.
+      // identity second, or a ct whose true arity differs from the slots a
+      // reconstruction assumes, both void a disclosure that way.
       //
-      // `pub` is untrusted external input: read each field exactly once,
-      // here, and never again.
-      const c1 = pub.memo.c1;
-      const record: SpendPublicInputs = {
-        root: pub.root,
-        dNow: pub.dNow,
-        tThreshold: pub.tThreshold,
-        apkX: pub.apkX,
-        apkY: pub.apkY,
-        memo: {
-          c1: { x: c1.x, y: c1.y, inf: c1.inf },
-          // Spread rather than four hard-coded slots: a copy that assumes
-          // the arity would manufacture `undefined` limbs out of a short
-          // ct instead of preserving it for `isWellFormedMemo` to reject.
-          ct: [...pub.memo.ct] as Limbs,
-        },
-        nPay: pub.nPay,
-        nTally: pub.nTally,
-        cOut1: pub.cOut1,
-        cOut2: pub.cOut2,
-        cTallyNew: pub.cTallyNew,
-      };
+      // Ordering alone is only half of it, though. A copy that assigns
+      // fields it never TYPED copies references, which is a copy by value
+      // only where the field happens to be primitive -- and nothing makes
+      // it so. `snapshot` closes the other half by admitting only genuine
+      // bigints and storing the values it checked, so the record shares no
+      // mutable state with the submitter. Identity of the wrapper was never
+      // the invariant; reachability of mutable state is.
+      const record = snapshot(pub);
 
-      if (this.auditorKey === null) {
-        throw new Error("no-auditor-key");
-      }
       if (!this.rootHistory.has(record.root.toString())) {
         throw new Error("unknown-root");
       }

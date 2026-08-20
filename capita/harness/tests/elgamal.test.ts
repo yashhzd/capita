@@ -152,6 +152,26 @@ test("isWellFormedMemo accepts a real memo and rejects every degenerate shape", 
     isWellFormedMemo({ ...good, c1: { x: good.c1.x, y: good.c1.y + P, inf: false } }),
   ).toBe(false);
 
+  // Arity is part of the predicate, and independently of the pool: this is
+  // what lets collect skip a wrong-length record instead of indexing past
+  // the end of one. `every` is vacuous past a short array, so the length
+  // test is what does the work.
+  expect(isWellFormedMemo({ ...good, ct: good.ct.slice(0, 3) as never })).toBe(false);
+  expect(isWellFormedMemo({ ...good, ct: [...good.ct, 7n] as never })).toBe(false);
+  expect(isWellFormedMemo({ ...good, ct: new Set(good.ct) as never })).toBe(false);
+
+  // Types are part of it too: JSON has no bigint, so a memo off a wire
+  // carries numbers or decimal strings, and reaching decrypt with either
+  // throws rather than returning a plaintext.
+  expect(isWellFormedMemo({ ...good, ct: [867, 949, 227, 828] as never })).toBe(false);
+  expect(
+    isWellFormedMemo({ ...good, ct: good.ct.map((l) => l.toString()) as never }),
+  ).toBe(false);
+  expect(
+    isWellFormedMemo({ ...good, c1: { x: Number(1), y: good.c1.y, inf: false } as never }),
+  ).toBe(false);
+  expect(isWellFormedMemo({ ...good, c1: { ...good.c1, inf: 0 } as never })).toBe(false);
+
   // Every ciphertext limb is a field element; P and -1n are not.
   expect(isWellFormedMemo({ ...good, ct: [good.ct[0], good.ct[1], good.ct[2], P] })).toBe(false);
   expect(isWellFormedMemo({ ...good, ct: [-1n, good.ct[1], good.ct[2], good.ct[3]] })).toBe(false);

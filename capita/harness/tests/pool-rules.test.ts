@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, expect, test } from "vitest";
-import { compile, execute } from "../src/prove.js";
+import { compile, execute, printAcir } from "../src/prove.js";
 import { closePoseidon } from "../src/poseidon.js";
 import { MerkleTree, type Path } from "../src/merkle.js";
 import { noteNullifier, ownerPk, paymentCommit, personId, tallyCommit } from "../src/notes.js";
@@ -613,6 +613,17 @@ test(
       pool.spend({ ...voided, apkX: stranger.x, apkY: stranger.y }),
     ).rejects.toThrow("wrong-auditor-key");
 
+    // ...and the ABSCISSA half of the pin needs its own witness. The
+    // negation above shares the real key's x by construction, so it only
+    // ever exercises y: dropping the x comparison left it passing. A
+    // declared key keeping the real y with a different x closes that.
+    // (Not a vacuous probe -- the pool never requires the DECLARED apk to
+    // be on-curve, and since (P-1) % 3 == 0 cubing is 3-to-1, so genuine
+    // on-curve points sharing a y with different x exist regardless.)
+    await expect(
+      pool.spend({ ...voided, apkX: 0n, apkY: APK.y }),
+    ).rejects.toThrow("wrong-auditor-key");
+
     expect(pool.seenNullifiers.size).toBe(0);
     expect(pool.tree.leafCount()).toBe(2);
   },
@@ -1213,8 +1224,13 @@ test(
       ct: [short.memo.ct[0], short.memo.ct[1], short.memo.ct[2]] as unknown as Limbs,
     };
 
+    // Rejected as a SHAPE violation now (rule 1) rather than a memo-content
+    // one (rule 6): arity is part of being a record at all, so it is caught
+    // at the snapshot boundary, before any content rule runs. The predicate
+    // keeps its own length check regardless -- it also guards `collect`,
+    // which reads memos the pool never saw.
     await expect(a.pool.spend({ ...short, memo: threeLimb })).rejects.toThrow(
-      "invalid-memo",
+      "malformed-record",
     );
 
     // The over-length case is the same defect from the other side, and it
@@ -1225,7 +1241,7 @@ test(
     const fiveLimb = [...short.memo.ct, 7n] as unknown as Limbs;
     await expect(
       a.pool.spend({ ...short, memo: { c1: short.memo.c1, ct: fiveLimb } }),
-    ).rejects.toThrow("invalid-memo");
+    ).rejects.toThrow("malformed-record");
 
     expect(a.pool.seenNullifiers.size).toBe(0);
     expect(a.pool.tree.leafCount()).toBe(2);
@@ -1465,3 +1481,357 @@ test("a pool with no auditor key configured accepts no spends", { timeout: 120_0
   expect(keyless.auditorKey).toBe(null);
   await expect(keyless.spend(sp)).rejects.toThrow("no-auditor-key");
 });
+
+// ---------------------------------------------------------------------------
+// The type boundary.
+//
+// `SpendPublicInputs` says every scalar is a bigint. At this boundary that is
+// a CLAIM about unverified input, not a fact, and the claim is what three
+// separate attacks turned out to share. JavaScript's relational and equality
+// operators coerce, so a value check alone passes anything whose `valueOf`
+// lands in range -- and a copy that stores what it never typed keeps the
+// caller's object reachable inside the transcript.
+// ---------------------------------------------------------------------------
+
+test(
+  "anything that is not genuinely a bigint is refused before it can be stored",
+  { timeout: 120_000 },
+  async () => {
+    const personSecret = 9122n;
+    const rT = 102n;
+    const aliceSk = 1132n;
+    const { pool, depositIndex } = await setupPool(personSecret, rT, aliceSk);
+    const rootBefore = pool.tree.root();
+
+    const sp = await runSpend({
+      personSecret,
+      vIn: 20000n,
+      ownerSk: aliceSk,
+      rIn: BigInt(depositIndex),
+      pathIn: pool.tree.path(depositIndex),
+      v1: 15000n,
+      pk1: await ownerPk(2222n),
+      r1: 1021n,
+      v2: 5000n,
+      r2: 1022n,
+      sOld: 0n,
+      dOld: DAY,
+      rT,
+      pathT: pool.tree.path(0),
+      rTNew: 1023n,
+      rEnc: 10201n,
+      root: rootBefore,
+      dNow: DAY,
+    });
+    const { c1, ct } = sp.memo;
+
+    // A wrapper whose valueOf is in range passes every value comparison, and
+    // stays LIVE inside whatever stores it: the payer keeps the handle and
+    // edits the evidence after settlement. Wrapper identity is not the
+    // invariant that matters -- reachability of mutable state is.
+    const live = { v: c1.x, valueOf() { return this.v; } };
+    const liveTally = { v: sp.cTallyNew, valueOf() { return this.v; } };
+
+    const vectors: [string, unknown][] = [
+      ["valueOf wrapper in c1.x", { ...sp, memo: { c1: { x: live, y: c1.y, inf: false }, ct } }],
+      ["valueOf wrapper in cTallyNew", { ...sp, cTallyNew: liveTally }],
+      // JSON has no bigint, so this is the shape any wire-fed operator API
+      // produces. Stored, it made collect throw rather than skip, which
+      // defeats the skip design entirely: the record is never reached.
+      ["numeric ct limbs", { ...sp, memo: { c1, ct: [867, 949, 227, 828] } }],
+      [
+        "decimal-string ct limbs",
+        { ...sp, memo: { c1, ct: ct.map((limb) => limb.toString()) } },
+      ],
+      ["numeric dNow", { ...sp, dNow: Number(DAY) }],
+      // The set is keyed by toString, so a toString that disagrees with the
+      // value burns the wrong key and leaves the real nullifier spendable.
+      [
+        "nullifier with a lying toString",
+        { ...sp, nPay: { valueOf: () => 500n, toString: () => "not-the-real-key" } },
+      ],
+      ["non-boolean inf", { ...sp, memo: { c1: { x: c1.x, y: c1.y, inf: 0 }, ct } }],
+    ];
+
+    for (const [label, record] of vectors) {
+      await expect(
+        pool.spend(record as SpendPublicInputs),
+        label,
+      ).rejects.toThrow("malformed-record");
+      expect(pool.seenNullifiers.size, label).toBe(0);
+      expect(pool.tree.leafCount(), label).toBe(2);
+      expect(pool.tree.root(), label).toBe(rootBefore);
+      expect(pool.spendLog, label).toHaveLength(0);
+    }
+
+    // The honest record still settles, and what the transcript holds is
+    // primitives throughout -- nothing the payer can still reach.
+    await pool.spend(sp);
+    const stored = pool.spendLog[0];
+    for (const [name, value] of [
+      ["root", stored.root],
+      ["dNow", stored.dNow],
+      ["tThreshold", stored.tThreshold],
+      ["apkX", stored.apkX],
+      ["apkY", stored.apkY],
+      ["nPay", stored.nPay],
+      ["nTally", stored.nTally],
+      ["cOut1", stored.cOut1],
+      ["cOut2", stored.cOut2],
+      ["cTallyNew", stored.cTallyNew],
+      ["memo.c1.x", stored.memo.c1.x],
+      ["memo.c1.y", stored.memo.c1.y],
+      ...stored.memo.ct.map((limb, i) => [`memo.ct[${i}]`, limb] as const),
+    ] as const) {
+      expect(typeof value, `${name} must be a primitive bigint`).toBe("bigint");
+    }
+    expect(typeof stored.memo.c1.inf).toBe("boolean");
+  },
+);
+
+test("collect skips a numeric-limb memo instead of dying on it", async () => {
+  // The auditor half of the same gap. isWellFormedMemo gates the skip, so
+  // if it is type-blind the bad record is never reached to be skipped --
+  // decrypt throws "Cannot mix BigInt and other types" and takes the honest
+  // disclosures in the batch with it, silently emptying `skipped` by never
+  // returning at all.
+  const pid = await personId(4343n);
+  const real = await encrypt([1n, pid, 15000n, DAY], APK, 4321n);
+  const numeric = { c1: real.c1, ct: [867, 949, 227, 828] } as unknown as Memo;
+  const stringy = {
+    c1: real.c1,
+    ct: real.ct.map((l) => l.toString()),
+  } as unknown as Memo;
+
+  const owed = [{ personId: pid, subtotal: 15000n, day: DAY }];
+  const run = await collect([numeric, real, stringy], ASK);
+  expect(run.disclosures).toEqual(owed);
+  expect(run.skipped).toEqual([0, 2]);
+});
+
+test(
+  "the pool reads the submitted memo exactly once",
+  { timeout: 120_000 },
+  async () => {
+    // Two reads of one untrusted field is the whole defect class: the record
+    // could take its c1 from read one and its ct from read two, a memo never
+    // submitted as a unit. Not exploitable before real proving, but it is
+    // precisely the invariant Task 11 leans on -- a verifier that reads
+    // pub.memo while the snapshot reads it again is verify-A-store-B under a
+    // new name.
+    const personSecret = 9123n;
+    const rT = 103n;
+    const aliceSk = 1133n;
+    const { pool, depositIndex } = await setupPool(personSecret, rT, aliceSk);
+
+    const sp = await runSpend({
+      personSecret,
+      vIn: 20000n,
+      ownerSk: aliceSk,
+      rIn: BigInt(depositIndex),
+      pathIn: pool.tree.path(depositIndex),
+      v1: 6000n,
+      pk1: await ownerPk(2222n),
+      r1: 1031n,
+      v2: 14000n,
+      r2: 1032n,
+      sOld: 0n,
+      dOld: DAY,
+      rT,
+      pathT: pool.tree.path(0),
+      rTNew: 1033n,
+      rEnc: 10301n,
+      root: pool.tree.root(),
+      dNow: DAY,
+    });
+
+    let reads = 0;
+    const counted = {
+      ...sp,
+      get memo() {
+        reads += 1;
+        return sp.memo;
+      },
+    };
+
+    await pool.spend(counted as SpendPublicInputs);
+    expect(reads, "memo must be read once and only once").toBe(1);
+    expect(pool.spendLog).toHaveLength(1);
+  },
+);
+
+test(
+  "a malformed submission reports the documented error, not a raw TypeError",
+  { timeout: 120_000 },
+  async () => {
+    // Taking the snapshot introduced a way to fail BEFORE the documented
+    // rules ran, so shapes that should have been rejected by name died on a
+    // raw TypeError instead. The snapshot is total now: it reports
+    // "malformed-record", and the configuration precondition still wins on a
+    // pool that cannot accept spends at all.
+    const personSecret = 9124n;
+    const rT = 104n;
+    const aliceSk = 1134n;
+    const { pool, depositIndex } = await setupPool(personSecret, rT, aliceSk);
+
+    const sp = await runSpend({
+      personSecret,
+      vIn: 20000n,
+      ownerSk: aliceSk,
+      rIn: BigInt(depositIndex),
+      pathIn: pool.tree.path(depositIndex),
+      v1: 6000n,
+      pk1: await ownerPk(2222n),
+      r1: 1041n,
+      v2: 14000n,
+      r2: 1042n,
+      sOld: 0n,
+      dOld: DAY,
+      rT,
+      pathT: pool.tree.path(0),
+      rTNew: 1043n,
+      rEnc: 10401n,
+      root: pool.tree.root(),
+      dNow: DAY,
+    });
+
+    const shapes: [string, unknown][] = [
+      ["null memo", { ...sp, memo: null }],
+      ["missing memo", { ...sp, memo: undefined }],
+      ["null c1", { ...sp, memo: { c1: null, ct: sp.memo.ct } }],
+      ["ct is not an array", { ...sp, memo: { c1: sp.memo.c1, ct: { length: 4 } } }],
+      // A Set of four valid limbs: array-like enough to spread, but not an
+      // array. Rejected rather than normalized, so the stored shape is
+      // always the declared one.
+      ["ct is a Set", { ...sp, memo: { c1: sp.memo.c1, ct: new Set(sp.memo.ct) } }],
+    ];
+
+    for (const [label, record] of shapes) {
+      const attempt = pool.spend(record as SpendPublicInputs);
+      await expect(attempt, label).rejects.toThrow("malformed-record");
+      await expect(attempt, label).rejects.not.toThrow(TypeError);
+    }
+
+    // The documented order is intact: a pool with no auditor key refuses on
+    // that ground first, whatever the submission looks like.
+    const keyless = new Pool(DAY);
+    await expect(
+      keyless.spend({ ...sp, memo: null } as unknown as SpendPublicInputs),
+    ).rejects.toThrow("no-auditor-key");
+  },
+);
+
+test(
+  "DAY_BITS matches the day range the spend circuit actually proves",
+  { timeout: 240_000 },
+  () => {
+    // The clock bound is only meaningful if it is the CIRCUIT's bound, and a
+    // test that recomputes the limit from the constant under test proves
+    // nothing -- DAY_BITS = 64 left the whole suite green. The dangerous
+    // direction is a bound too LOOSE, which lets the pool run a clock no
+    // spend can ever be proved against: exactly what bounding it prevented.
+    //
+    // So pin the constant to the compiled artifact. d_now is the second
+    // public parameter (main.nr's ABI order: root, d_now, t_threshold,
+    // apk_x, apk_y, c1[2], ct[4]) and must carry a range opcode of exactly
+    // DAY_BITS bits.
+    const acir = printAcir(SPEND_DIR);
+    const declared = /public parameters: \[([^\]]*)\]/.exec(acir);
+    expect(declared, "ACIR must declare its public parameters").not.toBeNull();
+    const publics = declared![1].split(",").map((w) => w.trim());
+
+    // Vacuity guard for the positional read: root, d_now, t_threshold,
+    // apk_x, apk_y, two c1 limbs, four ct limbs.
+    expect(publics).toHaveLength(11);
+    const dNow = publics[1];
+
+    expect(
+      acir.includes(`RANGE input: ${dNow}, bits: ${DAY_BITS}`),
+      `d_now (${dNow}) must carry a ${DAY_BITS}-bit range opcode; the harness ` +
+        `bounds the pool clock to DAY_BITS and the circuit is what makes that real`,
+    ).toBe(true);
+  },
+);
+
+test(
+  "duplicate payment outputs are deliberately admitted",
+  { timeout: 120_000 },
+  async () => {
+    // A DECISION RECORD, not a desired property. The pool deduplicates the
+    // tally and deliberately does NOT deduplicate payment outputs, and until
+    // now that absence was pinned by nothing: adding a dedup rule left the
+    // suite green, so a contributor "hardening" the pool met no red test.
+    //
+    // If this test fails because someone added the rule, the question to
+    // answer is not "why is this failing" but "does a wallet still have to
+    // make this check anyway" -- it does, so the rule would be a redundant
+    // usability guard, and a wallet that leaned on it would be depending on
+    // the operator's policy.
+    const personSecret = 9125n;
+    const rT = 105n;
+    const aliceSk = 1135n;
+    const bobSk = 2222n;
+    const bobPk = await ownerPk(bobSk);
+    const { pool, depositIndex } = await setupPool(personSecret, rT, aliceSk);
+
+    const first = await runSpend({
+      personSecret,
+      vIn: 20000n,
+      ownerSk: aliceSk,
+      rIn: BigInt(depositIndex),
+      pathIn: pool.tree.path(depositIndex),
+      v1: 4000n,
+      pk1: bobPk,
+      r1: 1051n,
+      v2: 16000n,
+      r2: 1052n,
+      sOld: 0n,
+      dOld: DAY,
+      rT,
+      pathT: pool.tree.path(0),
+      rTNew: 1053n,
+      rEnc: 10501n,
+      root: pool.tree.root(),
+      dNow: DAY,
+    });
+    await pool.spend(first);
+
+    // The same amount to the same recipient under the SAME salt, paid out
+    // of the change note: the recipient's commitment is bit-identical.
+    const second = await runSpend({
+      personSecret,
+      vIn: 16000n,
+      ownerSk: aliceSk,
+      rIn: 1052n,
+      pathIn: pool.tree.path(3),
+      v1: 4000n,
+      pk1: bobPk,
+      r1: 1051n,
+      v2: 12000n,
+      r2: 1054n,
+      sOld: 4000n,
+      dOld: DAY,
+      rT: 1053n,
+      pathT: pool.tree.path(4),
+      rTNew: 1055n,
+      rEnc: 10502n,
+      root: pool.tree.root(),
+      dNow: DAY,
+    });
+    expect(second.cOut1).toBe(first.cOut1);
+    expect(pool.tree.hasLeaf(second.cOut1)).toBe(true);
+
+    await pool.spend(second);
+    expect(pool.spendLog).toHaveLength(2);
+    expect(pool.tree.leafCount()).toBe(8);
+
+    // Why it is admitted: no value is created. Both leaves answer to ONE
+    // nullifier, so the recipient can realise one of two settled-looking
+    // payments -- destruction, never inflation. The party left short is the
+    // recipient, which is why the check belongs in their wallet, where a
+    // note is identified by its commitment.
+    expect(await noteNullifier(bobSk, second.cOut1)).toBe(
+      await noteNullifier(bobSk, first.cOut1),
+    );
+  },
+);

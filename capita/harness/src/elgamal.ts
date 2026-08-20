@@ -26,7 +26,13 @@ export function keygen(sk: bigint): Pt {
   return mul(sk, G);
 }
 
-const inField = (v: bigint): boolean => v >= 0n && v < P;
+// A genuine field element: a REAL bigint in [0, P). The type test is not
+// decoration. JavaScript's relational operators coerce, so `<` and `>=`
+// alone accept numbers, decimal strings, and any object with a `valueOf`
+// that lands in range -- and such a value then reaches code that does
+// bigint arithmetic on it, where it throws rather than compares.
+const isFieldElement = (v: unknown): v is bigint =>
+  typeof v === "bigint" && v >= 0n && v < P;
 
 /**
  * Whether `memo` is structurally decryptable: a finite, canonical, on-curve
@@ -44,16 +50,31 @@ const inField = (v: bigint): boolean => v >= 0n && v < P;
  * which throws.
  */
 export function isWellFormedMemo(memo: Memo): boolean {
-  const { c1, ct } = memo;
-  if (c1.inf || !inField(c1.x) || !inField(c1.y) || !isOnCurve(c1)) {
+  // Everything below is deliberately re-derived from `unknown`. The
+  // declared type is a CLAIM about unverified input, not a fact -- this
+  // predicate is what gates the auditor's skip, so it must reject every
+  // shape `decrypt` would choke on, not merely the ones out of range. A
+  // memo whose limbs are numbers is the realistic case: JSON has no bigint,
+  // so any memo that arrived over a wire has exactly that shape, and
+  // reaching `decrypt` with it throws "Cannot mix BigInt and other types"
+  // -- which would defeat skipping entirely, since the record is never
+  // reached to be skipped.
+  const { c1, ct } = memo as { c1: unknown; ct: unknown };
+  if (c1 === null || typeof c1 !== "object") {
+    return false;
+  }
+  const { x, y, inf } = c1 as { x: unknown; y: unknown; inf: unknown };
+  if (typeof inf !== "boolean" || inf) {
+    return false;
+  }
+  if (!isFieldElement(x) || !isFieldElement(y) || !isOnCurve({ x, y, inf })) {
     return false;
   }
   // Arity is checked explicitly, and the length comparison is NOT vacuous
-  // just because `Limbs` is a four-tuple: at this boundary the type is a
-  // claim about unverified input, not a fact. `Array.prototype.every`
-  // returns true for indices past the end of a short array, so a three-limb
-  // ct would otherwise satisfy the per-limb test below.
-  return ct.length === 4 && ct.every(inField);
+  // just because `Limbs` is a four-tuple. `Array.prototype.every` returns
+  // true for indices past the end of a short array, so a three-limb ct
+  // would otherwise satisfy the per-limb test.
+  return Array.isArray(ct) && ct.length === 4 && ct.every(isFieldElement);
 }
 
 // pad_i = p2([S.x, S.y, i]). Coordinates are < P by construction and i is
