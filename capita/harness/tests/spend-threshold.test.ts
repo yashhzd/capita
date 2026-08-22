@@ -437,15 +437,25 @@ test(
     // solver rejects oversized limbs either way), so the pin reads the
     // compiled ACIR -- the thing that actually gets proven in Task 11.
     const acir = printAcir(SPEND_DIR);
+    const msms = [...acir.matchAll(/MULTI_SCALAR_MUL[^\n]*scalars: \[([^\]]*)\]/g)];
     const scalarWitnesses = new Set<string>();
-    for (const msm of acir.matchAll(/MULTI_SCALAR_MUL[^\n]*scalars: \[([^\]]*)\]/g)) {
+    for (const msm of msms) {
       for (const w of msm[1].matchAll(/w\d+/g)) {
         scalarWitnesses.add(w[0]);
       }
     }
     // Vacuity guard: the memo's shared secret and ephemeral point are two
-    // MSMs over the same (lo, hi) scalar pair.
-    expect(scalarWitnesses.size).toBeGreaterThanOrEqual(2);
+    // SEPARATE MSMs over the same (lo, hi) scalar pair. Both counts are
+    // pinned, not just the union of witnesses -- because that union comes
+    // from the same two witnesses regardless of how many MSM opcodes
+    // contribute to it, `scalarWitnesses.size >= 2` alone would still pass
+    // if a refactor collapsed the two MSMs into one that happened to reuse
+    // both scalars, silently losing whichever constraint depended on the
+    // circuit actually performing two multiplications. Requiring exactly
+    // two MSM matches closes that; requiring exactly two witnesses (not
+    // merely "at least") closes the matching gap in the other direction.
+    expect(msms, "the memo encrypts through exactly two MSMs").toHaveLength(2);
+    expect(scalarWitnesses.size, "both MSMs share exactly one scalar pair").toBe(2);
     for (const witness of scalarWitnesses) {
       expect(
         acir.includes(`RANGE input: ${witness}, bits: 128`),
