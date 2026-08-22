@@ -158,16 +158,19 @@ cd capita/harness && npm install && npx vitest run
 
 ## Current status
 
-Green as of the latest commit: **79 tests passing**, 36 circuit tests (`nargo test`) and 43 harness tests (vitest).
+Green as of the latest commit: **118 tests passing**, 36 circuit tests (`nargo test`) and 82 harness tests (vitest).
 
 Working:
 
 - Poseidon2 hashing matched between the TypeScript harness and Noir across arities
-- incremental Merkle tree, nullifier and enrollment sets, pool acceptance state machine
+- incremental Merkle tree, nullifier and enrollment sets
 - Grumpkin curve operations and hash-ElGamal encryption, in both implementations
 - enrollment circuit, with duplicate-enrollment rejection
 - spend circuit: payment validity, tally consume and update, business-day reset
 - threshold branch with uniform disclosure memos, including in-circuit encryption correctness
+- pool acceptance rules: root, day, threshold and auditor-key pinning, double-spend and duplicate-tally rejection, all closing bypasses the circuit alone cannot
+- an end-to-end scenario exercising the full protocol against the real pool: two people, three wallets, a crossing spend that forces a real disclosure, and a structural sweep confirming no identifier is ever published
+- real UltraHonk proof generation and verification for both circuits, cross-checked against tampered public inputs
 
 Measured, on an Apple M4 Max (14 cores, 36 GB), median of 10 runs, all proofs verifying:
 
@@ -186,8 +189,8 @@ would repair. Reproduce with `npx tsx bench/spend-bench.ts`.
 Not done yet:
 
 - **The credential layer is mocked.** The prototype takes a pre-verified `person_secret` behind the interface in spec §7.1 rather than parsing and verifying a real passport. Published zkPassport proving costs will be cited for the end-to-end estimate. This is disclosed plainly in the paper too, since it is the difference between "the accounting works" and "the whole thing works."
-- **Proving is benchmarked, not yet integrated.** `bench/spend-bench.ts` generates and verifies real UltraHonk proofs, which is where the numbers above come from. The `prove()` and `verify()` wrappers in `harness/src/prove.ts` are still stubs, and the pool does not yet bind verified public inputs to accepted state; that integration is the next substantial piece of work.
-- Pool acceptance rules, the end-to-end scenario walkthrough, and the remaining paper sections.
+- **The pool does not yet verify proofs.** `harness/src/prove.ts` now generates and verifies real UltraHonk proofs (`harness/tests/proving.test.ts` proves this against both circuits, including a case where a tampered public input correctly fails verification), but `Pool.enroll`/`Pool.spend` still accept an executed witness's public inputs directly rather than a proof — the acceptance rules are exercised, but not yet bound to a verified proof. Wiring that binding through is the next substantial piece of work.
+- The remaining paper sections.
 
 ## Paper
 
