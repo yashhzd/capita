@@ -84,6 +84,32 @@ export function printAcir(circuitDir: string): string {
   );
 }
 
+export interface CircuitInfo {
+  /** ACIR opcode count for `main`, as `nargo info --json` reports it. This
+   *  is a constraint-system size proxy, not the UltraHonk backend's own gate
+   *  count (which `bb gates` reports separately and the paper's evaluation
+   *  table cites) -- the two measure different representations of the same
+   *  circuit and are not interchangeable. */
+  acirOpcodes: number;
+}
+
+/** Compiles the circuit and parses `nargo info`'s constraint count for `main`. */
+export function nargoInfo(circuitDir: string): CircuitInfo {
+  const raw = execFileSync(nargoBin(), ["info", "--json"], {
+    cwd: circuitDir,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const parsed = JSON.parse(raw) as {
+    programs: Array<{ functions: Array<{ name: string; opcodes: number }> }>;
+  };
+  const main = parsed.programs[0]?.functions.find((f) => f.name === "main");
+  if (!main) {
+    throw new Error(`nargo info: no "main" function reported for ${circuitDir}`);
+  }
+  return { acirOpcodes: main.opcodes };
+}
+
 function artifactPath(circuitDir: string): string {
   // nargo names the artifact after the package, not the directory.
   const manifest = readFileSync(join(circuitDir, "Nargo.toml"), "utf8");
